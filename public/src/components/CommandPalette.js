@@ -93,6 +93,14 @@ function buildActions() {
     category: 'view',
     action: () => setState({ feedFilter: 'errors', showCommandPalette: false }),
   });
+  actions.push({
+    id: 'view:canvas-graph',
+    icon: s.forceCanvasGraph ? '\u25a3' : '\u25a2',
+    label: s.forceCanvasGraph ? 'Use SVG Graph (auto)' : 'Use Canvas Graph',
+    shortcut: '',
+    category: 'view',
+    action: () => setState({ forceCanvasGraph: !s.forceCanvasGraph, showCommandPalette: false }),
+  });
 
   return actions;
 }

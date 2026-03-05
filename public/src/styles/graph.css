@@ -75,6 +75,13 @@
 .node-role { fill: var(--text-secondary); font-family: var(--font-ui); font-size: 10px; }
 .node-telem { fill: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
 
+/* Canvas graph renderer */
+.canvas-graph {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 /* Empty state */
 .graph-empty {
   display: flex;

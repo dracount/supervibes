@@ -1,9 +1,12 @@
 import { h } from '../lib/preact.module.js';
-import { useRef, useEffect, useState } from '../lib/preact-hooks.module.js';
+import { useRef, useEffect, useState, useCallback } from '../lib/preact-hooks.module.js';
 import { html } from '../lib/html.js';
 import { useStore, setState } from '../state/store.js';
 import { computeLayout, NODE_W, NODE_H } from '../graph/layout.js';
 import { edgePath } from '../graph/edges.js';
+import { CanvasGraph } from '../graph/CanvasGraph.js';
+
+const CANVAS_THRESHOLD = 20;
 
 function formatTokens(n) {
   if (!n) return '0';
@@ -51,6 +54,7 @@ export function TopologyGraph() {
   const contextWarnings = useStore(s => s.contextWarnings);
   const logEntries = useStore(s => s.logEntries);
   const selectedAgent = useStore(s => s.selectedAgent);
+  const forceCanvas = useStore(s => s.forceCanvasGraph);
   const containerRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 500 });
 
@@ -64,13 +68,34 @@ export function TopologyGraph() {
     return () => ro.disconnect();
   }, []);
 
+  const handleSelectAgent = useCallback((name) => {
+    setState({ selectedAgent: name });
+  }, []);
+
   if (!taskPlan || !taskPlan.tasks || taskPlan.tasks.length === 0) {
     return html`<div class="topology-graph" ref=${containerRef}>
       <div class="graph-empty">Waiting for execution plan...</div>
     </div>`;
   }
 
-  // Build set of agent names that received interventions
+  // Switch to Canvas renderer for large graphs or when forced
+  const useCanvas = forceCanvas || taskPlan.tasks.length > CANVAS_THRESHOLD;
+
+  if (useCanvas) {
+    return html`<div class="topology-graph" ref=${containerRef}>
+      <${CanvasGraph}
+        taskPlan=${taskPlan}
+        taskStatus=${taskStatus}
+        agentStates=${agentStates}
+        contextWarnings=${contextWarnings}
+        logEntries=${logEntries}
+        selectedAgent=${selectedAgent}
+        onSelectAgent=${handleSelectAgent}
+      />
+    </div>`;
+  }
+
+  // SVG renderer for small graphs
   const interventionAgents = new Set();
   if (logEntries) {
     for (const entry of logEntries) {
