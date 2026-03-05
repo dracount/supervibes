@@ -17,12 +17,12 @@ const {
 } = require("./prompts.cjs");
 const { JsonlMonitor } = require("./jsonl-monitor.cjs");
 const {
-  validatePlan, extractPlanFromOutput, createTaskStatus, calculateRetryDelay,
-  isTaskTimedOut, canRetryTask, TASK_STATES, TASK_TYPES,
-  WAIT_CONDITION_TYPES, DEFAULT_WAIT_POLL_INTERVAL, DEFAULT_WAIT_TIMEOUT,
+  validatePlan, extractPlanFromOutput, TASK_STATES,
 } = require("./task-schema.cjs");
 const { ProjectMemory, extractLearnings, extractIssues, scanFileStructure } = require("./memory.cjs");
 const { HookRunner } = require("./hooks.cjs");
+const { StateManager } = require("./state-manager.cjs");
+const { ConductorExecutor } = require("./conductor.cjs");
 
 const PORT = 3456;
 
@@ -49,36 +49,21 @@ const SYSTEM_PROMPT = buildSystemPrompt(TMUX_CONTROL);
 
 // --- State ---
 
+const sm = new StateManager();
+
 const state = {
-  running: false,
   controllerProcess: null,
   controllerOutput: [],   // ring buffer, max MAX_BUFFER_LINES
-  goal: "",
-  terminalCount: "auto",
-  model: "sonnet",
-  iterations: 0,          // total iterations requested
-  currentIteration: 0,    // 0 = initial build, 1+ = improvement iterations
-  reviewDone: false,       // mandatory review completed?
-  phase: "idle",           // "planning", "build", "review", "iteration", "postcheck", "idle"
-  postChecks: null,        // array of {check, pass, msg} after post-checks run
-  sessions: [],
-  sseClients: [],
   pollInterval: null,
   monitor: null,
   restoreAttempts: {},  // name → count, prevents infinite restore loops
   // --- CrewAI-inspired features ---
   taskPlan: null,          // structured TaskPlan from planning phase
-  taskStatus: {},          // name → { status, validation, attempts, startedAt, ... }
   memory: null,            // ProjectMemory instance
   hooks: null,             // HookRunner instance
   guardrailResults: null,  // last guardrail results map (for late-joining SSE clients)
-  // --- Conductor-inspired features ---
-  workflowTimeoutTimer: null,   // setTimeout handle for workflow-level timeout
-  taskTimeoutInterval: null,    // setInterval handle for per-task timeout checks
-  waitConditionInterval: null,  // setInterval handle for WAIT condition polling
-  workflowStartedAt: null,      // timestamp when workflow execution started
-  retryQueue: [],               // [{taskName, retryAt}] tasks waiting to be retried
-  retryInterval: null,          // setInterval for retry queue processing
+  // --- Conductor-inspired features (managed by ConductorExecutor) ---
+  conductor: null,         // ConductorExecutor instance — owns taskStatus, retryQueue, timers
 };
 
 // --- Helpers ---
@@ -95,14 +80,7 @@ function pushControllerLine(line) {
 }
 
 function broadcast(event, data) {
-  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (let i = state.sseClients.length - 1; i >= 0; i--) {
-    try {
-      state.sseClients[i].write(msg);
-    } catch (_) {
-      state.sseClients.splice(i, 1);
-    }
-  }
+  sm.broadcast(event, data);
 }
 
 function runTmux(...args) {
@@ -141,7 +119,7 @@ function pollTerminals() {
         }
       }
     }
-    state.sessions = sessions;
+    sm.sessions = sessions;
 
     // Register new sessions with JSONL monitor
     if (state.monitor) {
@@ -152,7 +130,7 @@ function pollTerminals() {
     }
 
     // Auto-recovery: detect disappeared sessions that had active JSONL state
-    if (state.monitor && state.running) {
+    if (state.monitor && sm.running) {
       const savedState = loadSessionState();
       const agentInfo = state.monitor.getAll();
       for (const [name, info] of Object.entries(agentInfo)) {
@@ -180,145 +158,47 @@ function pollTerminals() {
   } catch (_) {}
 }
 
-// --- Conductor-inspired: Task timeout monitoring ---
+// --- Conductor: Helper to get task status from conductor (or empty object) ---
 
-function startTaskTimeoutMonitoring() {
-  if (state.taskTimeoutInterval) return;
-  state.taskTimeoutInterval = setInterval(() => {
-    if (!state.taskPlan || !state.running) return;
-
-    for (const task of state.taskPlan.tasks) {
-      const ts = state.taskStatus[task.name];
-      if (!ts) continue;
-
-      if (isTaskTimedOut(ts)) {
-        const elapsed = Math.round((Date.now() - ts.startedAt) / 1000);
-        const timeoutMsg = `[TIMEOUT] Task "${task.name}" exceeded ${ts.timeoutSeconds}s limit (ran for ${elapsed}s)`;
-        pushControllerLine(timeoutMsg);
-        broadcast("controller", { line: timeoutMsg });
-        notify("Multi-Claude", `Task timed out: ${task.name}`);
-
-        // Kill the worker's tmux session
-        try { runTmux(`--stop ${task.name}`); } catch (_) {}
-
-        if (canRetryTask(ts)) {
-          // Schedule retry
-          ts.status = TASK_STATES.RETRYING;
-          ts.error = `Timed out after ${elapsed}s`;
-          const delay = calculateRetryDelay(ts.retryLogic, ts.retryDelaySeconds, ts.attempts);
-          const retryMsg = `[RETRY] Scheduling retry for "${task.name}" (attempt ${ts.attempts + 1}/${ts.maxAttempts}) in ${Math.round(delay / 1000)}s`;
-          pushControllerLine(retryMsg);
-          broadcast("controller", { line: retryMsg });
-          state.retryQueue.push({ taskName: task.name, retryAt: Date.now() + delay });
-        } else {
-          // No more retries
-          if (ts.optional) {
-            ts.status = TASK_STATES.COMPLETED_WITH_ERRORS;
-            ts.error = `Timed out after ${elapsed}s (optional task, continuing)`;
-            const optMsg = `[OPTIONAL] Task "${task.name}" timed out but is optional — continuing workflow`;
-            pushControllerLine(optMsg);
-            broadcast("controller", { line: optMsg });
-          } else {
-            ts.status = TASK_STATES.TIMED_OUT;
-            ts.error = `Timed out after ${elapsed}s (no retries remaining)`;
-          }
-          ts.completedAt = Date.now();
-        }
-        broadcast("taskStatus", { taskStatus: state.taskStatus });
-      }
-    }
-  }, 5000); // Check every 5 seconds
+function getTaskStatus() {
+  return state.conductor ? state.conductor.getTaskStatus() : {};
 }
 
-function stopTaskTimeoutMonitoring() {
-  if (state.taskTimeoutInterval) {
-    clearInterval(state.taskTimeoutInterval);
-    state.taskTimeoutInterval = null;
+// --- Conductor: Failure workflow ---
+
+function runFailureWorkflow(failedTasks) {
+  if (!state.taskPlan || !state.conductor) return;
+
+  const failureDescription = state.taskPlan.failureWorkflow;
+  if (!failureDescription && failedTasks.length === 0) return;
+
+  const failureMsg = `\n--- Failure Workflow: Diagnosing ${failedTasks.length} failed task(s) ---\n`;
+  pushControllerLine(failureMsg);
+  broadcast("controller", { line: failureMsg });
+
+  const diagMsg = `Failed tasks:\n${state.conductor.getFailureSummary(failedTasks)}`;
+  pushControllerLine(diagMsg);
+  broadcast("controller", { line: diagMsg });
+  notify("Multi-Claude", `${failedTasks.length} task(s) failed — check dashboard`);
+
+  // Fire hook if available
+  if (state.hooks && state.hooks.hasHooks) {
+    const taskStatus = getTaskStatus();
+    state.hooks.run("tasks.failed", {
+      failedTasks: failedTasks.map(name => ({
+        name,
+        ...taskStatus[name],
+      })),
+    });
   }
 }
 
-// --- Conductor-inspired: Workflow-level timeout ---
+// --- Conductor: Stop conductor if active ---
 
-function startWorkflowTimeout(timeoutSeconds) {
-  if (!timeoutSeconds || timeoutSeconds <= 0) return;
-  if (state.workflowTimeoutTimer) clearTimeout(state.workflowTimeoutTimer);
-
-  state.workflowStartedAt = Date.now();
-  state.workflowTimeoutTimer = setTimeout(() => {
-    const msg = `[WORKFLOW TIMEOUT] Workflow exceeded ${timeoutSeconds}s limit — terminating all tasks`;
-    pushControllerLine(msg);
-    broadcast("controller", { line: msg });
-    notify("Multi-Claude", "Workflow timed out!");
-
-    // Mark all in-progress tasks as timed out
-    for (const [name, ts] of Object.entries(state.taskStatus)) {
-      if (ts.status === TASK_STATES.IN_PROGRESS || ts.status === TASK_STATES.WAITING || ts.status === TASK_STATES.RETRYING) {
-        ts.status = TASK_STATES.TIMED_OUT;
-        ts.completedAt = Date.now();
-        ts.error = "Workflow timeout exceeded";
-      } else if (ts.status === TASK_STATES.PENDING || ts.status === TASK_STATES.SCHEDULED) {
-        ts.status = TASK_STATES.CANCELLED;
-        ts.error = "Cancelled due to workflow timeout";
-      }
-    }
-    broadcast("taskStatus", { taskStatus: state.taskStatus });
-
-    // Stop everything
-    stopController();
-  }, timeoutSeconds * 1000);
-
-  const timeoutMsg = `[WORKFLOW] Timeout set: ${timeoutSeconds}s (${Math.round(timeoutSeconds / 60)}min)`;
-  pushControllerLine(timeoutMsg);
-  broadcast("controller", { line: timeoutMsg });
-}
-
-function stopWorkflowTimeout() {
-  if (state.workflowTimeoutTimer) {
-    clearTimeout(state.workflowTimeoutTimer);
-    state.workflowTimeoutTimer = null;
+function stopConductorTimers() {
+  if (state.conductor) {
+    state.conductor.stop();
   }
-}
-
-// --- Conductor-inspired: Retry queue processing ---
-
-function startRetryQueueProcessing() {
-  if (state.retryInterval) return;
-  state.retryInterval = setInterval(() => {
-    if (!state.running || state.retryQueue.length === 0) return;
-
-    const now = Date.now();
-    const ready = state.retryQueue.filter(r => now >= r.retryAt);
-    state.retryQueue = state.retryQueue.filter(r => now < r.retryAt);
-
-    for (const item of ready) {
-      const ts = state.taskStatus[item.taskName];
-      if (!ts || ts.status !== TASK_STATES.RETRYING) continue;
-
-      const task = state.taskPlan.tasks.find(t => t.name === item.taskName);
-      if (!task) continue;
-
-      const retryMsg = `[RETRY] Restarting task "${item.taskName}" (attempt ${ts.attempts + 1}/${ts.maxAttempts})`;
-      pushControllerLine(retryMsg);
-      broadcast("controller", { line: retryMsg });
-
-      // Reset task state for retry
-      ts.status = TASK_STATES.SCHEDULED;
-      ts.startedAt = null;
-      ts.error = null;
-      broadcast("taskStatus", { taskStatus: state.taskStatus });
-
-      // Restart the worker tmux session
-      retryWorkerTask(task);
-    }
-  }, 3000);
-}
-
-function stopRetryQueueProcessing() {
-  if (state.retryInterval) {
-    clearInterval(state.retryInterval);
-    state.retryInterval = null;
-  }
-  state.retryQueue = [];
 }
 
 /**
@@ -326,7 +206,8 @@ function stopRetryQueueProcessing() {
  * The controller is still running — we restart just this worker.
  */
 function retryWorkerTask(task) {
-  const ts = state.taskStatus[task.name];
+  if (!state.conductor) return;
+  const ts = state.conductor.getTask(task.name);
   if (!ts) return;
 
   try {
@@ -339,14 +220,11 @@ function retryWorkerTask(task) {
     // Start new session
     runTmux(`--start ${task.name} "${workDir}"`);
 
-    // Mark as in_progress
-    ts.status = TASK_STATES.IN_PROGRESS;
-    ts.attempts++;
-    ts.startedAt = Date.now();
-    broadcast("taskStatus", { taskStatus: state.taskStatus });
+    // Mark as in_progress via conductor
+    state.conductor.markRetryInProgress(task.name);
 
     // Launch Claude Code in the new session
-    const model = state.model || "sonnet";
+    const model = sm.model || "sonnet";
     setTimeout(() => {
       runTmux(`--cmd ${task.name} "claude --dangerously-skip-permissions --model ${model}"`);
       setTimeout(() => {
@@ -373,117 +251,44 @@ function retryWorkerTask(task) {
     const errMsg = `[RETRY ERROR] Failed to restart "${task.name}": ${e.message}`;
     pushControllerLine(errMsg);
     broadcast("controller", { line: errMsg });
-    ts.status = TASK_STATES.FAILED;
-    ts.completedAt = Date.now();
-    ts.error = `Retry restart failed: ${e.message}`;
-    broadcast("taskStatus", { taskStatus: state.taskStatus });
+    state.conductor.markRetryFailed(task.name, `Retry restart failed: ${e.message}`);
   }
 }
 
-// --- Conductor-inspired: WAIT condition checking ---
+/**
+ * Create a ConductorExecutor for a plan and wire up its events.
+ */
+function createConductor(plan) {
+  const conductor = new ConductorExecutor(plan, {
+    findProjectDir,
+  });
 
-function startWaitConditionPolling() {
-  if (state.waitConditionInterval) return;
-  state.waitConditionInterval = setInterval(() => {
-    if (!state.taskPlan || !state.running) return;
+  // Wire conductor events to SSE broadcasting
+  conductor.on("statusChanged", (taskStatus) => {
+    broadcast("taskStatus", { taskStatus });
+  });
 
-    for (const task of state.taskPlan.tasks) {
-      const ts = state.taskStatus[task.name];
-      if (!ts || ts.status !== TASK_STATES.WAITING) continue;
-      if (!ts.waitCondition) continue;
+  conductor.on("log", (msg) => {
+    pushControllerLine(msg);
+    broadcast("controller", { line: msg });
+  });
 
-      let conditionMet = false;
-      const projectDir = findProjectDir() || __dirname;
+  conductor.on("taskTimedOut", (taskName) => {
+    notify("Multi-Claude", `Task timed out: ${taskName}`);
+    // Kill the worker's tmux session
+    try { runTmux(`--stop ${taskName}`); } catch (_) {}
+  });
 
-      if (ts.waitCondition.type === WAIT_CONDITION_TYPES.FILE_EXISTS) {
-        const filePath = path.resolve(projectDir, ts.waitCondition.target);
-        conditionMet = fs.existsSync(filePath);
-      } else if (ts.waitCondition.type === WAIT_CONDITION_TYPES.HTTP_READY) {
-        try {
-          execFileSync("curl", ["-sf", "-o", "/dev/null", "--max-time", "3", ts.waitCondition.target], {
-            timeout: 5000, stdio: "pipe"
-          });
-          conditionMet = true;
-        } catch (_) {
-          conditionMet = false;
-        }
-      }
+  conductor.on("workflowTimeout", () => {
+    notify("Multi-Claude", "Workflow timed out!");
+    stopController();
+  });
 
-      if (conditionMet) {
-        const waitMsg = `[WAIT] Condition met for "${task.name}" (${ts.waitCondition.type}: ${ts.waitCondition.target})`;
-        pushControllerLine(waitMsg);
-        broadcast("controller", { line: waitMsg });
-        ts.status = TASK_STATES.SCHEDULED;
-        broadcast("taskStatus", { taskStatus: state.taskStatus });
-      } else {
-        // Check WAIT timeout
-        const waitTimeout = (ts.waitCondition.timeoutSeconds || DEFAULT_WAIT_TIMEOUT) * 1000;
-        if (ts.startedAt && (Date.now() - ts.startedAt) > waitTimeout) {
-          const waitTimeoutMsg = `[WAIT TIMEOUT] Task "${task.name}" wait condition not met within ${ts.waitCondition.timeoutSeconds || DEFAULT_WAIT_TIMEOUT}s`;
-          pushControllerLine(waitTimeoutMsg);
-          broadcast("controller", { line: waitTimeoutMsg });
-          if (ts.optional) {
-            ts.status = TASK_STATES.COMPLETED_WITH_ERRORS;
-            ts.error = "Wait condition timed out (optional task)";
-          } else {
-            ts.status = TASK_STATES.TIMED_OUT;
-            ts.error = "Wait condition timed out";
-          }
-          ts.completedAt = Date.now();
-          broadcast("taskStatus", { taskStatus: state.taskStatus });
-        }
-      }
-    }
-  }, (DEFAULT_WAIT_POLL_INTERVAL) * 1000);
-}
+  conductor.on("retryReady", (taskName, task) => {
+    retryWorkerTask(task);
+  });
 
-function stopWaitConditionPolling() {
-  if (state.waitConditionInterval) {
-    clearInterval(state.waitConditionInterval);
-    state.waitConditionInterval = null;
-  }
-}
-
-// --- Conductor-inspired: Failure workflow ---
-
-function runFailureWorkflow(failedTasks) {
-  if (!state.taskPlan) return;
-
-  const failureDescription = state.taskPlan.failureWorkflow;
-  if (!failureDescription && failedTasks.length === 0) return;
-
-  const failureMsg = `\n--- Failure Workflow: Diagnosing ${failedTasks.length} failed task(s) ---\n`;
-  pushControllerLine(failureMsg);
-  broadcast("controller", { line: failureMsg });
-
-  const failureSummary = failedTasks.map(name => {
-    const ts = state.taskStatus[name];
-    return `- ${name}: ${ts.status} (${ts.error || "unknown error"}, attempts: ${ts.attempts}/${ts.maxAttempts})`;
-  }).join("\n");
-
-  const diagMsg = `Failed tasks:\n${failureSummary}`;
-  pushControllerLine(diagMsg);
-  broadcast("controller", { line: diagMsg });
-  notify("Multi-Claude", `${failedTasks.length} task(s) failed — check dashboard`);
-
-  // Fire hook if available
-  if (state.hooks && state.hooks.hasHooks) {
-    state.hooks.run("tasks.failed", {
-      failedTasks: failedTasks.map(name => ({
-        name,
-        ...state.taskStatus[name],
-      })),
-    });
-  }
-}
-
-// --- Conductor-inspired: Cleanup all Conductor timers ---
-
-function stopConductorTimers() {
-  stopTaskTimeoutMonitoring();
-  stopWorkflowTimeout();
-  stopRetryQueueProcessing();
-  stopWaitConditionPolling();
+  return conductor;
 }
 
 function startPolling() {
@@ -690,30 +495,18 @@ function spawnControllerWithPrompt(prompt, model) {
 
   // Track task state transitions from controller's tmux-control commands
   const trackTaskStateFromCommand = (command) => {
-    if (!state.taskPlan || !command) return;
+    if (!state.taskPlan || !state.conductor || !command) return;
 
     // Detect --start <name> commands → mark task as SCHEDULED
     const startMatch = /--start\s+(\S+)/.exec(command);
     if (startMatch) {
-      const name = startMatch[1];
-      const ts = state.taskStatus[name];
-      if (ts && (ts.status === TASK_STATES.PENDING || ts.status === TASK_STATES.SCHEDULED)) {
-        ts.status = TASK_STATES.SCHEDULED;
-        broadcast("taskStatus", { taskStatus: state.taskStatus });
-      }
+      state.conductor.scheduleTask(startMatch[1]);
     }
 
     // Detect --cmd <name> "<prompt>" with content → mark task as IN_PROGRESS
     const cmdMatch = /--cmd\s+(\S+)\s+["'](.+)["']/.exec(command);
     if (cmdMatch && cmdMatch[2].trim().length > 0) {
-      const name = cmdMatch[1];
-      const ts = state.taskStatus[name];
-      if (ts && (ts.status === TASK_STATES.PENDING || ts.status === TASK_STATES.SCHEDULED)) {
-        ts.status = TASK_STATES.IN_PROGRESS;
-        ts.attempts = Math.max(ts.attempts, 1);
-        if (!ts.startedAt) ts.startedAt = Date.now();
-        broadcast("taskStatus", { taskStatus: state.taskStatus });
-      }
+      state.conductor.startTask(cmdMatch[1]);
     }
   };
 
@@ -831,13 +624,13 @@ function spawnController(goal, terminalCount, model, iteration) {
   const prompt = buildPrompt(goal, terminalCount, model, iteration || 0);
   const { child, flushBuffer } = spawnControllerWithPrompt(prompt, model);
 
-  state.running = true;
-  state.goal = goal;
-  state.terminalCount = terminalCount;
-  state.model = model || "sonnet";
+  sm.running = true;
+  sm.goal = goal;
+  sm.terminalCount = terminalCount;
+  sm.model = model || "sonnet";
   state.controllerOutput = [];
-  state.sessions = [];
-  state.phase = iteration === 0 ? "build" : "iteration";
+  sm.sessions = [];
+  sm.phase = iteration === 0 ? "build" : "iteration";
 
   // Create JSONL monitor
   ensureMonitor();
@@ -846,9 +639,9 @@ function spawnController(goal, terminalCount, model, iteration) {
     running: true,
     goal,
     terminalCount,
-    phase: state.phase,
-    currentIteration: state.currentIteration,
-    iterations: state.iterations,
+    phase: sm.phase,
+    currentIteration: sm.currentIteration,
+    iterations: sm.iterations,
   });
 
   if (iteration === 0) {
@@ -864,10 +657,10 @@ function spawnController(goal, terminalCount, model, iteration) {
 
     // Cleanup tmux sessions
     try { runTmux("--stop-all"); } catch (_) {}
-    state.sessions = [];
+    sm.sessions = [];
     broadcast("terminals", { sessions: [] });
 
-    if (state.stopped) {
+    if (sm.stopped) {
       // User stopped — end immediately
       finishRun("Stopped by user");
       return;
@@ -882,9 +675,9 @@ function spawnController(goal, terminalCount, model, iteration) {
     // --- Post-exit state machine ---
 
     // After initial build (iteration 0) or an iteration: do mandatory review if not done
-    if (!state.reviewDone) {
-      state.reviewDone = true;
-      state.phase = "review";
+    if (!sm.reviewDone) {
+      sm.reviewDone = true;
+      sm.phase = "review";
 
       const reviewMsg = "\n--- Mandatory Review Round starting ---\n";
       pushControllerLine(reviewMsg);
@@ -899,25 +692,25 @@ function spawnController(goal, terminalCount, model, iteration) {
     }
 
     // After review: continue with user-requested improvement iterations
-    if (state.currentIteration < state.iterations) {
-      state.currentIteration++;
-      state.phase = "iteration";
+    if (sm.currentIteration < sm.iterations) {
+      sm.currentIteration++;
+      sm.phase = "iteration";
 
-      const iterMsg = `\n--- Iteration ${state.currentIteration} of ${state.iterations} starting ---\n`;
+      const iterMsg = `\n--- Iteration ${sm.currentIteration} of ${sm.iterations} starting ---\n`;
       pushControllerLine(iterMsg);
       broadcast("controller", { line: iterMsg });
       broadcast("status", {
         running: true,
         phase: "iteration",
-        currentIteration: state.currentIteration,
-        iterations: state.iterations,
+        currentIteration: sm.currentIteration,
+        iterations: sm.iterations,
       });
 
       // Reset reviewDone so iteration also gets reviewed
-      state.reviewDone = false;
+      sm.reviewDone = false;
 
       setTimeout(() => {
-        spawnController(state.goal, state.terminalCount, state.model, state.currentIteration);
+        spawnController(sm.goal, sm.terminalCount, sm.model, sm.currentIteration);
       }, 2000);
       return;
     }
@@ -944,10 +737,10 @@ function spawnReviewController(goal, model) {
 
     // Cleanup tmux sessions
     try { runTmux("--stop-all"); } catch (_) {}
-    state.sessions = [];
+    sm.sessions = [];
     broadcast("terminals", { sessions: [] });
 
-    if (state.stopped) {
+    if (sm.stopped) {
       finishRun("Stopped by user");
       return;
     }
@@ -957,25 +750,25 @@ function spawnReviewController(goal, model) {
     broadcast("controller", { line: reviewEndMsg });
 
     // After review: continue with improvement iterations if any remain
-    if (code === 0 && state.currentIteration < state.iterations) {
-      state.currentIteration++;
-      state.phase = "iteration";
+    if (code === 0 && sm.currentIteration < sm.iterations) {
+      sm.currentIteration++;
+      sm.phase = "iteration";
 
-      const iterMsg = `\n--- Iteration ${state.currentIteration} of ${state.iterations} starting ---\n`;
+      const iterMsg = `\n--- Iteration ${sm.currentIteration} of ${sm.iterations} starting ---\n`;
       pushControllerLine(iterMsg);
       broadcast("controller", { line: iterMsg });
       broadcast("status", {
         running: true,
         phase: "iteration",
-        currentIteration: state.currentIteration,
-        iterations: state.iterations,
+        currentIteration: sm.currentIteration,
+        iterations: sm.iterations,
       });
 
       // Reset reviewDone so iteration also gets reviewed
-      state.reviewDone = false;
+      sm.reviewDone = false;
 
       setTimeout(() => {
-        spawnController(state.goal, state.terminalCount, state.model, state.currentIteration);
+        spawnController(sm.goal, sm.terminalCount, sm.model, sm.currentIteration);
       }, 2000);
       return;
     }
@@ -988,7 +781,7 @@ function spawnReviewController(goal, model) {
 }
 
 async function runPostChecksPhase() {
-  state.phase = "postcheck";
+  sm.phase = "postcheck";
   const postMsg = "\n--- Running post-build checks ---\n";
   pushControllerLine(postMsg);
   broadcast("controller", { line: postMsg });
@@ -1000,7 +793,7 @@ async function runPostChecksPhase() {
   broadcast("controller", { line: dirMsg });
 
   const results = await runPostChecks(projectDir);
-  state.postChecks = results;
+  sm.postChecks = results;
 
   // Broadcast each result
   for (const r of results) {
@@ -1024,34 +817,13 @@ async function runPostChecksPhase() {
 }
 
 function generateWorkflowSummary() {
-  const counts = { completed: 0, failed: 0, timed_out: 0, cancelled: 0, completed_with_errors: 0, retried: 0 };
-  for (const [name, ts] of Object.entries(state.taskStatus)) {
-    if (counts[ts.status] !== undefined) counts[ts.status]++;
-    if (ts.attempts > 1) counts.retried++;
-  }
-
-  const totalTasks = Object.keys(state.taskStatus).length;
-  const elapsed = state.workflowStartedAt
-    ? Math.round((Date.now() - state.workflowStartedAt) / 1000)
-    : 0;
-
-  let summary = `\n=== WORKFLOW SUMMARY ===\n`;
-  summary += `Tasks: ${totalTasks} total`;
-  if (counts.completed > 0) summary += `, ${counts.completed} completed`;
-  if (counts.completed_with_errors > 0) summary += `, ${counts.completed_with_errors} completed with errors`;
-  if (counts.failed > 0) summary += `, ${counts.failed} failed`;
-  if (counts.timed_out > 0) summary += `, ${counts.timed_out} timed out`;
-  if (counts.cancelled > 0) summary += `, ${counts.cancelled} cancelled`;
-  if (counts.retried > 0) summary += ` (${counts.retried} retried)`;
-  if (elapsed > 0) summary += `\nDuration: ${elapsed}s (${Math.round(elapsed / 60)}min)`;
-  summary += `\n========================\n`;
-
-  return summary;
+  if (!state.conductor) return "";
+  return state.conductor.getSummary(sm.workflowStartedAt).summaryText;
 }
 
 function finishRun(reason) {
-  state.running = false;
-  state.phase = "idle";
+  sm.running = false;
+  sm.phase = "idle";
   stopConductorTimers();
 
   if (reason) {
@@ -1060,7 +832,7 @@ function finishRun(reason) {
   }
 
   // Generate Conductor-style workflow summary
-  if (state.taskPlan && Object.keys(state.taskStatus).length > 0) {
+  if (state.taskPlan && state.conductor && Object.keys(getTaskStatus()).length > 0) {
     const summary = generateWorkflowSummary();
     pushControllerLine(summary);
     broadcast("controller", { line: summary });
@@ -1075,12 +847,12 @@ function finishRun(reason) {
       try {
         const mem = new ProjectMemory(projectDir);
         mem.addRun({
-          goal: state.goal,
+          goal: sm.goal,
           outcome: reason ? "failure" : "success",
           architecture: state.taskPlan.architecture || "",
           fileStructure: scanFileStructure(projectDir),
           learnings: extractLearnings(state.controllerOutput),
-          issues: extractIssues(state.controllerOutput, state.postChecks),
+          issues: extractIssues(state.controllerOutput, sm.postChecks),
           decisions: [],
         });
       } catch (_) {}
@@ -1091,9 +863,9 @@ function finishRun(reason) {
   // Fire hooks
   if (state.hooks && state.hooks.hasHooks) {
     state.hooks.run("build.completed", {
-      goal: state.goal,
+      goal: sm.goal,
       outcome: reason || "success",
-      postChecks: state.postChecks,
+      postChecks: sm.postChecks,
     });
   }
   // Stop JSONL monitor
@@ -1103,21 +875,21 @@ function finishRun(reason) {
   }
   clearSessionState();
 
-  if (state.iterations > 0 && !state.stopped) {
-    pushControllerLine(`[All ${state.iterations} iteration(s) complete]`);
-    broadcast("controller", { line: `[All ${state.iterations} iteration(s) complete]` });
+  if (sm.iterations > 0 && !sm.stopped) {
+    pushControllerLine(`[All ${sm.iterations} iteration(s) complete]`);
+    broadcast("controller", { line: `[All ${sm.iterations} iteration(s) complete]` });
   }
 
   broadcast("status", {
     running: false,
     phase: "idle",
-    postChecks: state.postChecks,
+    postChecks: sm.postChecks,
   });
-  state.stopped = false;
+  sm.stopped = false;
 }
 
 function stopController() {
-  state.stopped = true;
+  sm.stopped = true;
   if (state.controllerProcess) {
     state.controllerProcess.kill("SIGTERM");
     // Give it a moment, then force kill
@@ -1142,9 +914,9 @@ function stopController() {
   stopConductorTimers();
   clearSessionState();
   stopPolling();
-  state.running = false;
-  state.phase = "idle";
-  state.sessions = [];
+  sm.running = false;
+  sm.phase = "idle";
+  sm.sessions = [];
 
   broadcast("status", { running: false, phase: "idle" });
   broadcast("terminals", { sessions: [] });
@@ -1157,11 +929,13 @@ function stopController() {
  * Checks file existence, exports, and string patterns.
  */
 function runGuardrails(projectDir, plan) {
+  if (!state.conductor) return;
+  const conductor = state.conductor;
   const results = {};
   const failedTasks = [];
 
   for (const task of plan.tasks) {
-    const ts = state.taskStatus[task.name];
+    const ts = conductor.getTask(task.name);
 
     // Skip tasks that are already terminally failed/timed out (no expected output to check)
     if (ts && (ts.status === TASK_STATES.TIMED_OUT || ts.status === TASK_STATES.CANCELLED)) {
@@ -1171,13 +945,9 @@ function runGuardrails(projectDir, plan) {
     if (!task.expectedOutput) {
       // Mark tasks without expected output as completed (e.g. qa)
       if (!ts || ts.status === TASK_STATES.PENDING || ts.status === TASK_STATES.IN_PROGRESS) {
-        if (ts) {
-          ts.status = TASK_STATES.COMPLETED;
-          ts.completedAt = Date.now();
-        } else {
-          state.taskStatus[task.name] = createTaskStatus(task);
-          state.taskStatus[task.name].status = TASK_STATES.COMPLETED;
-          state.taskStatus[task.name].completedAt = Date.now();
+        const entry = conductor.ensureTaskStatus(task.name);
+        if (entry) {
+          conductor.completeTask(task.name);
         }
       }
       continue;
@@ -1235,35 +1005,25 @@ function runGuardrails(projectDir, plan) {
     ].every(Boolean);
 
     if (ts) {
-      ts.validation = taskResult;
+      conductor.setValidation(task.name, taskResult);
       if (allPass) {
-        ts.status = TASK_STATES.COMPLETED;
-        ts.completedAt = Date.now();
-      } else if (canRetryTask(ts)) {
-        // Schedule retry
-        ts.status = TASK_STATES.RETRYING;
-        ts.error = "Guardrail validation failed";
-        const delay = calculateRetryDelay(ts.retryLogic, ts.retryDelaySeconds, ts.attempts);
-        const retryMsg = `[RETRY] Guardrails failed for "${task.name}" — scheduling retry (attempt ${ts.attempts + 1}/${ts.maxAttempts}) in ${Math.round(delay / 1000)}s`;
-        pushControllerLine(retryMsg);
-        broadcast("controller", { line: retryMsg });
-        state.retryQueue.push({ taskName: task.name, retryAt: Date.now() + delay });
-      } else if (ts.optional) {
-        ts.status = TASK_STATES.COMPLETED_WITH_ERRORS;
-        ts.completedAt = Date.now();
-        ts.error = "Guardrail validation failed (optional task)";
+        conductor.completeTask(task.name, taskResult);
       } else {
-        ts.status = TASK_STATES.FAILED;
-        ts.completedAt = Date.now();
-        ts.error = "Guardrail validation failed";
-        failedTasks.push(task.name);
+        const result = conductor.failTask(task.name, "Guardrail validation failed");
+        if (result.retrying) {
+          const retryMsg = `[RETRY] Guardrails failed for "${task.name}" — scheduling retry`;
+          pushControllerLine(retryMsg);
+          broadcast("controller", { line: retryMsg });
+        } else if (!ts.optional && ts.status === TASK_STATES.FAILED) {
+          failedTasks.push(task.name);
+        }
       }
     }
   }
 
   state.guardrailResults = results;
   broadcast("guardrails", { results });
-  broadcast("taskStatus", { taskStatus: state.taskStatus });
+  broadcast("taskStatus", { taskStatus: getTaskStatus() });
 
   // Log results
   for (const [name, result] of Object.entries(results)) {
@@ -1290,15 +1050,15 @@ function runGuardrails(projectDir, plan) {
  * Spawns a lightweight Claude invocation that outputs a JSON plan.
  */
 function spawnPlanningPhase(goal, terminalCount, model) {
-  state.phase = "planning";
-  state.running = true;
-  state.goal = goal;
-  state.terminalCount = terminalCount;
-  state.model = model || "sonnet";
+  sm.phase = "planning";
+  sm.running = true;
+  sm.goal = goal;
+  sm.terminalCount = terminalCount;
+  sm.model = model || "sonnet";
   state.controllerOutput = [];
-  state.sessions = [];
+  sm.sessions = [];
   state.taskPlan = null;
-  state.taskStatus = {};
+  state.conductor = null;
 
   broadcast("status", { running: true, phase: "planning", goal, terminalCount });
 
@@ -1338,7 +1098,7 @@ function spawnPlanningPhase(goal, terminalCount, model) {
     flushBuffer();
     state.controllerProcess = null;
 
-    if (state.stopped) {
+    if (sm.stopped) {
       finishRun("Stopped by user");
       return;
     }
@@ -1372,16 +1132,14 @@ function spawnPlanningPhase(goal, terminalCount, model) {
 
     // Plan is valid — store and broadcast with enhanced status tracking
     state.taskPlan = plan;
-    state.taskStatus = {};
-    for (const task of plan.tasks) {
-      state.taskStatus[task.name] = createTaskStatus(task);
-    }
+    state.conductor = createConductor(plan);
+    state.conductor.initTaskStatus();
 
     const planOkMsg = `\n--- Plan created: ${plan.tasks.length} tasks ---\n`;
     pushControllerLine(planOkMsg);
     broadcast("controller", { line: planOkMsg });
     broadcast("plan", { plan });
-    broadcast("taskStatus", { taskStatus: state.taskStatus });
+    broadcast("taskStatus", { taskStatus: getTaskStatus() });
 
     if (state.hooks && state.hooks.hasHooks) {
       state.hooks.run("plan.created", { plan });
@@ -1399,37 +1157,24 @@ function spawnPlanningPhase(goal, terminalCount, model) {
  * Spawns the controller with the structured plan as context.
  */
 function spawnExecutionPhase(plan, model) {
-  state.phase = "build";
-  state.workflowStartedAt = Date.now();
+  sm.phase = "build";
+  sm.workflowStartedAt = Date.now();
   const memoryContext = state.memory ? state.memory.buildContext() : "";
   const modelInstruction = buildModelInstruction(model);
   const executionPrompt = buildExecutionPrompt(TMUX_CONTROL, plan, memoryContext, modelInstruction);
 
   const { child, flushBuffer } = spawnControllerWithPrompt(executionPrompt, model);
 
-  broadcast("status", { running: true, phase: "build", goal: state.goal });
+  broadcast("status", { running: true, phase: "build", goal: sm.goal });
   notify("Multi-Claude", "Build started (structured mode)");
 
-  // Start Conductor-inspired monitoring
-  if (plan.timeoutSeconds) {
-    startWorkflowTimeout(plan.timeoutSeconds);
-  }
-  startTaskTimeoutMonitoring();
-  startRetryQueueProcessing();
-  startWaitConditionPolling();
-
-  // Initialize WAIT task states
-  for (const task of plan.tasks) {
-    const ts = state.taskStatus[task.name];
-    if (ts && task.taskType === TASK_TYPES.WAIT && task.waitCondition) {
-      ts.status = TASK_STATES.WAITING;
-      ts.startedAt = Date.now();
-      broadcast("taskStatus", { taskStatus: state.taskStatus });
-    }
+  // Start Conductor-inspired monitoring via ConductorExecutor
+  if (state.conductor) {
+    state.conductor.start();
   }
 
   if (state.hooks && state.hooks.hasHooks) {
-    state.hooks.run("build.started", { goal: state.goal, plan });
+    state.hooks.run("build.started", { goal: sm.goal, plan });
   }
 
   // Create JSONL monitor
@@ -1442,10 +1187,10 @@ function spawnExecutionPhase(plan, model) {
     stopConductorTimers();
 
     try { runTmux("--stop-all"); } catch (_) {}
-    state.sessions = [];
+    sm.sessions = [];
     broadcast("terminals", { sessions: [] });
 
-    if (state.stopped) {
+    if (sm.stopped) {
       finishRun("Stopped by user");
       return;
     }
@@ -1464,9 +1209,7 @@ function spawnExecutionPhase(plan, model) {
 
     // Check for non-optional failed tasks — if any exist, still continue to review
     // (review phase may fix them)
-    const criticalFailures = Object.entries(state.taskStatus)
-      .filter(([_, ts]) => ts.status === TASK_STATES.FAILED || ts.status === TASK_STATES.TIMED_OUT)
-      .filter(([_, ts]) => !ts.optional);
+    const criticalFailures = state.conductor ? state.conductor.getCriticalFailures() : [];
     if (criticalFailures.length > 0) {
       const failMsg = `[WARNING] ${criticalFailures.length} critical task(s) failed — proceeding to review for potential fixes`;
       pushControllerLine(failMsg);
@@ -1474,9 +1217,9 @@ function spawnExecutionPhase(plan, model) {
     }
 
     // Continue to review phase (same state machine as legacy)
-    if (!state.reviewDone) {
-      state.reviewDone = true;
-      state.phase = "review";
+    if (!sm.reviewDone) {
+      sm.reviewDone = true;
+      sm.phase = "review";
 
       const reviewMsg = "\n--- Mandatory Review Round starting ---\n";
       pushControllerLine(reviewMsg);
@@ -1485,23 +1228,23 @@ function spawnExecutionPhase(plan, model) {
       notify("Multi-Claude", "Review round starting");
 
       setTimeout(() => {
-        spawnReviewController(state.goal, model);
+        spawnReviewController(sm.goal, model);
       }, 2000);
       return;
     }
 
-    if (state.currentIteration < state.iterations) {
-      state.currentIteration++;
-      state.phase = "iteration";
-      state.reviewDone = false;
+    if (sm.currentIteration < sm.iterations) {
+      sm.currentIteration++;
+      sm.phase = "iteration";
+      sm.reviewDone = false;
 
-      const iterMsg = `\n--- Iteration ${state.currentIteration} of ${state.iterations} starting ---\n`;
+      const iterMsg = `\n--- Iteration ${sm.currentIteration} of ${sm.iterations} starting ---\n`;
       pushControllerLine(iterMsg);
       broadcast("controller", { line: iterMsg });
-      broadcast("status", { running: true, phase: "iteration", currentIteration: state.currentIteration, iterations: state.iterations });
+      broadcast("status", { running: true, phase: "iteration", currentIteration: sm.currentIteration, iterations: sm.iterations });
 
       setTimeout(() => {
-        spawnController(state.goal, state.terminalCount, state.model, state.currentIteration);
+        spawnController(sm.goal, sm.terminalCount, sm.model, sm.currentIteration);
       }, 2000);
       return;
     }
@@ -1548,7 +1291,7 @@ const server = http.createServer(async (req, res) => {
   // --- API Routes ---
 
   if (pathname === "/api/start" && req.method === "POST") {
-    if (state.running) {
+    if (sm.running) {
       return sendJson(res, 400, { error: "Already running" });
     }
     const body = await parseBody(req);
@@ -1564,20 +1307,19 @@ const server = http.createServer(async (req, res) => {
 
     const structured = body.structured !== false; // default true
 
-    state.iterations = iterations;
-    state.currentIteration = 0;
-    state.stopped = false;
-    state.reviewDone = false;
-    state.postChecks = null;
+    sm.iterations = iterations;
+    sm.currentIteration = 0;
+    sm.stopped = false;
+    sm.reviewDone = false;
+    sm.postChecks = null;
     state.guardrailResults = null;
     state.restoreAttempts = {};
     state.taskPlan = null;
-    state.taskStatus = {};
     state.hooks = null;
     // Reset Conductor state
     stopConductorTimers();
-    state.workflowStartedAt = null;
-    state.retryQueue = [];
+    state.conductor = null;
+    sm.workflowStartedAt = null;
 
     // Load project memory before planning so prior learnings are available
     state.memory = null;
@@ -1601,20 +1343,20 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === "/api/status" && req.method === "GET") {
     return sendJson(res, 200, {
-      running: state.running,
-      goal: state.goal,
-      terminalCount: state.terminalCount,
-      model: state.model,
-      iterations: state.iterations,
-      currentIteration: state.currentIteration,
-      phase: state.phase,
-      reviewDone: state.reviewDone,
-      postChecks: state.postChecks,
-      sessions: state.sessions,
+      running: sm.running,
+      goal: sm.goal,
+      terminalCount: sm.terminalCount,
+      model: sm.model,
+      iterations: sm.iterations,
+      currentIteration: sm.currentIteration,
+      phase: sm.phase,
+      reviewDone: sm.reviewDone,
+      postChecks: sm.postChecks,
+      sessions: sm.sessions,
       taskPlan: state.taskPlan,
-      taskStatus: state.taskStatus,
-      workflowStartedAt: state.workflowStartedAt,
-      retryQueue: state.retryQueue.length,
+      taskStatus: getTaskStatus(),
+      workflowStartedAt: sm.workflowStartedAt,
+      retryQueue: state.conductor ? state.conductor.getRetryQueueLength() : 0,
     });
   }
 
@@ -1648,7 +1390,33 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === "/api/plan" && req.method === "GET") {
-    return sendJson(res, 200, { plan: state.taskPlan, taskStatus: state.taskStatus });
+    return sendJson(res, 200, { plan: state.taskPlan, taskStatus: getTaskStatus() });
+  }
+
+  if (pathname === "/api/workflow/summary" && req.method === "GET") {
+    const summary = state.conductor
+      ? state.conductor.getSummary(sm.workflowStartedAt)
+      : { totalTasks: 0, completed: 0, failed: 0, timedOut: 0, retried: 0, totalDuration: 0, costEstimate: 0 };
+    return sendJson(res, 200, summary);
+  }
+
+  if (pathname === "/api/agents/context" && req.method === "GET") {
+    const agents = {};
+    if (state.monitor) {
+      for (const [name, info] of state.monitor._sessions) {
+        const t = info.tokens;
+        const totalInput = t.input + t.cacheRead;
+        agents[name] = {
+          inputTokens: t.input,
+          outputTokens: t.output,
+          cacheRead: t.cacheRead,
+          cacheCreation: t.cacheCreation,
+          contextWarned: info.contextWarned,
+          estimatedContextPct: Math.min(100, Math.round((totalInput / 200000) * 100)),
+        };
+      }
+    }
+    return sendJson(res, 200, { agents });
   }
 
   if (pathname === "/api/memory" && req.method === "GET") {
@@ -1756,9 +1524,9 @@ const server = http.createServer(async (req, res) => {
     stopConductorTimers();
     clearSessionState();
     stopPolling();
-    state.running = false;
-    state.phase = 'idle';
-    state.sessions = [];
+    sm.running = false;
+    sm.phase = 'idle';
+    sm.sessions = [];
     broadcast('status', { running: false, phase: 'idle' });
     broadcast('terminals', { sessions: [] });
     broadcast('intervention', { agent: '*', action: 'estop', timestamp: Date.now(), detail: 'Emergency stop — all agents killed' });
@@ -1773,30 +1541,19 @@ const server = http.createServer(async (req, res) => {
       Connection: "keep-alive",
     });
 
-    state.sseClients.push(res);
+    sm.addClient(res);
 
     // Send init event with current state
-    const initData = {
-      running: state.running,
-      goal: state.goal,
-      terminalCount: state.terminalCount,
-      model: state.model,
-      iterations: state.iterations,
-      currentIteration: state.currentIteration,
-      phase: state.phase,
-      reviewDone: state.reviewDone,
-      postChecks: state.postChecks,
+    const initData = Object.assign(sm.toInitData(), {
       controllerOutput: state.controllerOutput,
-      sessions: state.sessions,
       taskPlan: state.taskPlan,
-      taskStatus: state.taskStatus,
-      workflowStartedAt: state.workflowStartedAt,
-    };
+      taskStatus: getTaskStatus(),
+    });
     // Add agent states and conversation buffers for late-joining clients
     if (state.monitor) {
       initData.agentStates = state.monitor.getAll();
       const convos = {};
-      for (const name of state.sessions) {
+      for (const name of sm.sessions) {
         const buf = state.monitor.getConversation(name);
         if (buf.length > 0) convos[name] = buf;
       }
@@ -1817,8 +1574,7 @@ const server = http.createServer(async (req, res) => {
     res.write(`event: init\ndata: ${JSON.stringify(initData)}\n\n`);
 
     req.on("close", () => {
-      const idx = state.sseClients.indexOf(res);
-      if (idx !== -1) state.sseClients.splice(idx, 1);
+      sm.removeClient(res);
     });
     return;
   }
