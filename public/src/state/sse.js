@@ -147,6 +147,10 @@ export function connectSSE() {
       postChecks: d.postChecks || null,
       workflowStartedAt: d.workflowStartedAt || null,
     });
+    if (d.agentConversations) {
+      setState({ agentConversations: d.agentConversations });
+    }
+    if (d.fileChanges) setState({ fileChanges: d.fileChanges });
   });
 
   eventSource.addEventListener('controller', (e) => {
@@ -192,6 +196,29 @@ export function connectSSE() {
     const agentSessionIds = { ...getState().agentSessionIds };
     agentSessionIds[d.name] = d.sessionId;
     setState({ agentSessionIds });
+  });
+
+  eventSource.addEventListener('agentConversation', (e) => {
+    const d = JSON.parse(e.data);
+    const convos = { ...getState().agentConversations };
+    const list = convos[d.agent] ? [...convos[d.agent]] : [];
+    list.push({ type: d.type, content: d.content, toolName: d.toolName, toolId: d.toolId, input: d.input, timestamp: d.timestamp });
+    if (list.length > 200) list.splice(0, list.length - 200);
+    convos[d.agent] = list;
+    setState({ agentConversations: convos });
+  });
+
+  eventSource.addEventListener('fileChange', (e) => {
+    const d = JSON.parse(e.data);
+    const changes = [...getState().fileChanges, d];
+    if (changes.length > 500) changes.splice(0, changes.length - 500);
+    setState({ fileChanges: changes });
+  });
+
+  eventSource.addEventListener('contextWarning', (e) => {
+    const d = JSON.parse(e.data);
+    const warnings = { ...getState().contextWarnings, [d.agent]: d };
+    setState({ contextWarnings: warnings });
   });
 
   eventSource.addEventListener('guardrails', (e) => {
