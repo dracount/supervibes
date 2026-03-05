@@ -1,0 +1,82 @@
+.topology-graph {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-void);
+  min-width: 0;
+}
+
+.topology-graph svg {
+  width: 100%;
+  height: 100%;
+}
+
+.graph-node {
+  cursor: pointer;
+  transition: filter var(--transition-fast);
+}
+.graph-node:hover rect { stroke-opacity: 0.8; }
+.graph-node.selected rect {
+  stroke-width: 2;
+  filter: drop-shadow(0 0 8px var(--state-active));
+}
+
+.graph-node rect {
+  fill: var(--bg-surface);
+  stroke: var(--border-active);
+  stroke-width: 1;
+  rx: 8;
+  ry: 8;
+  transition: stroke var(--transition-fast), filter var(--transition-fast);
+}
+
+/* State-based node borders */
+.graph-node.state-active rect     { stroke: var(--state-active); }
+.graph-node.state-thinking rect   { stroke: var(--state-thinking); }
+.graph-node.state-tool_use rect   { stroke: var(--state-tool-use); }
+.graph-node.state-waiting rect    { stroke: var(--state-waiting); }
+.graph-node.state-completed rect  { stroke: var(--state-completed); }
+.graph-node.state-failed rect     { stroke: var(--state-failed); filter: drop-shadow(0 0 6px var(--state-failed)); }
+.graph-node.state-retrying rect   { stroke: var(--state-retrying); }
+.graph-node.state-idle rect       { stroke: var(--state-idle); }
+.graph-node.state-human rect      { stroke: var(--state-human); filter: drop-shadow(0 0 8px var(--state-human)); }
+
+.graph-edge {
+  fill: none;
+  stroke: var(--border-active);
+  stroke-width: 1.5;
+  transition: stroke var(--transition-fast);
+}
+.graph-edge.resolved { stroke: var(--state-completed); stroke-opacity: 0.5; }
+.graph-edge.pending {
+  stroke-dasharray: 6 4;
+  animation: dash-flow 1s linear infinite;
+}
+
+@keyframes dash-flow {
+  to { stroke-dashoffset: -10; }
+}
+
+.phase-label {
+  fill: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.node-state-dot { transition: fill var(--transition-fast); }
+.node-name { fill: var(--text-primary); font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.node-role { fill: var(--text-secondary); font-family: var(--font-ui); font-size: 10px; }
+.node-telem { fill: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
+
+/* Empty state */
+.graph-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+}

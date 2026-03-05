@@ -1,0 +1,56 @@
+/* Main layout */
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Resize handle between graph and detail panel */
+.resize-handle-v {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  transition: background var(--transition-fast);
+}
+.resize-handle-v:hover,
+.resize-handle-v.active {
+  background: var(--state-waiting);
+}
+
+/* Resize handle between main and feed */
+.resize-handle-h {
+  height: 4px;
+  cursor: row-resize;
+  background: transparent;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  transition: background var(--transition-fast);
+}
+.resize-handle-h:hover,
+.resize-handle-h.active {
+  background: var(--state-waiting);
+}
+
+/* Keyboard shortcut hints */
+.shortcut-hint {
+  position: fixed;
+  bottom: 8px;
+  right: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.5;
+  pointer-events: none;
+}

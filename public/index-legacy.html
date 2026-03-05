@@ -1,0 +1,1593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nested Claude Code</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #1a1a2e;
+    color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: #0d1117;
+    border-bottom: 1px solid #30363d;
+    flex-shrink: 0;
+  }
+
+  header h1 { font-size: 16px; font-weight: 600; color: #e6edf3; }
+
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #8b949e;
+  }
+
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #8b949e;
+  }
+  .status-dot.running { background: #3fb950; }
+  .status-dot.planning { background: #b392f0; }
+  .status-dot.review { background: #d29922; }
+  .status-dot.postcheck { background: #58a6ff; }
+
+  /* --- Controls --- */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 20px;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+    flex-shrink: 0;
+  }
+
+  .controls input[type="text"] {
+    flex: 1;
+    padding: 8px 12px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #e6edf3;
+    font-size: 14px;
+    outline: none;
+  }
+  .controls input[type="text"]:focus { border-color: #58a6ff; }
+
+  .controls select {
+    padding: 8px 12px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #e6edf3;
+    font-size: 14px;
+    outline: none;
+    cursor: pointer;
+  }
+
+  .controls button {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .controls button:hover { opacity: 0.85; }
+  .controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-start { background: #238636; color: #fff; }
+  .btn-stop { background: #da3633; color: #fff; }
+
+  /* --- Main Layout --- */
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* --- Activity Log Panel --- */
+  .panel-log {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #30363d;
+  }
+
+  .panel-header {
+    padding: 8px 16px;
+    background: #161b22;
+    border-bottom: 1px solid #30363d;
+    font-size: 13px;
+    font-weight: 600;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+  }
+
+  .log-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+    background: #000;
+  }
+
+  .log-entry {
+    display: flex;
+    gap: 10px;
+    padding: 5px 16px;
+    font-size: 13px;
+    line-height: 1.5;
+    border-bottom: 1px solid #111;
+  }
+
+  .log-entry .log-time {
+    color: #555;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    flex-shrink: 0;
+    min-width: 55px;
+    padding-top: 2px;
+  }
+
+  .log-entry .log-icon {
+    flex-shrink: 0;
+    width: 18px;
+    text-align: center;
+    padding-top: 1px;
+  }
+
+  .log-entry .log-msg {
+    flex: 1;
+    word-break: break-word;
+    color: #fff;
+  }
+
+  .log-entry .log-msg .log-detail {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: #ccc;
+    margin-top: 2px;
+    white-space: pre-wrap;
+  }
+
+  .log-entry.type-start .log-icon { color: #56d364; }
+  .log-entry.type-start .log-msg { color: #fff; }
+
+  .log-entry.type-prompt .log-icon { color: #79c0ff; }
+  .log-entry.type-prompt .log-msg { color: #fff; }
+
+  .log-entry.type-read .log-icon { color: #666; }
+  .log-entry.type-read .log-msg { color: #888; }
+
+  .log-entry.type-stop .log-icon { color: #ff7b72; }
+  .log-entry.type-stop .log-msg { color: #fff; }
+
+  .log-entry.type-info .log-icon { color: #e3b341; }
+  .log-entry.type-info .log-msg { color: #fff; }
+
+  .log-entry.type-exit .log-icon { color: #ff7b72; }
+  .log-entry.type-exit .log-msg { color: #fff; }
+
+  .log-entry.type-review .log-icon { color: #d29922; }
+  .log-entry.type-review .log-msg { color: #d29922; }
+
+  .log-entry.type-postcheck .log-icon { color: #58a6ff; }
+  .log-entry.type-postcheck .log-msg { color: #fff; }
+
+  .log-entry.type-think .log-icon { color: #8b7ec8; }
+  .log-entry.type-think .log-msg { color: #9a8ec0; font-style: italic; white-space: pre-wrap; }
+
+  .log-entry.type-plan .log-icon { color: #b392f0; }
+  .log-entry.type-plan .log-msg { color: #d2a8ff; }
+
+  .log-entry.type-verify .log-icon { color: #56d364; }
+  .log-entry.type-verify .log-msg { color: #56d364; font-weight: 600; }
+
+  .log-entry.type-ownership .log-icon { color: #d29922; }
+  .log-entry.type-ownership .log-msg { color: #e3b341; }
+
+  .terminal-ownership {
+    font-size: 10px;
+    color: #d29922;
+    background: rgba(210, 153, 34, 0.15);
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-left: 4px;
+    flex-shrink: 0;
+  }
+
+  /* --- Post-check results --- */
+  .postcheck-results {
+    border-top: 1px solid #30363d;
+    padding: 12px 16px;
+    background: #0d1117;
+    flex-shrink: 0;
+  }
+
+  .postcheck-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+
+  .postcheck-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  .postcheck-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+  }
+  .postcheck-badge.pass { background: #238636; color: #fff; }
+  .postcheck-badge.fail { background: #da3633; color: #fff; }
+
+  .postcheck-name { color: #e6edf3; }
+  .postcheck-msg { color: #8b949e; }
+
+  /* --- Terminals Sidebar --- */
+  .panel-terminals {
+    width: 300px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .terminals-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+  }
+
+  .terminal-count {
+    font-size: 13px;
+    color: #8b949e;
+    margin-bottom: 12px;
+  }
+
+  .terminal-card {
+    margin-bottom: 8px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .terminal-card.expanded { border-color: #58a6ff; }
+
+  .terminal-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    color: #e6edf3;
+    cursor: pointer;
+    user-select: none;
+  }
+  .terminal-item:hover { background: #161b22; }
+
+  .terminal-item .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #3fb950; flex-shrink: 0;
+  }
+  .terminal-item .name {
+    font-weight: 500;
+    font-family: "SF Mono", "Fira Code", Menlo, Consolas, monospace;
+    flex: 1;
+  }
+  .terminal-item .prompt-count {
+    font-size: 11px; color: #8b949e; background: #21262d;
+    padding: 1px 6px; border-radius: 10px;
+  }
+  .terminal-item .chevron {
+    font-size: 10px; color: #484f58; transition: transform 0.15s;
+  }
+  .terminal-card.expanded .chevron { transform: rotate(90deg); }
+
+  .terminal-prompts {
+    display: none;
+    border-top: 1px solid #21262d;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .terminal-card.expanded .terminal-prompts { display: block; }
+
+  .prompt-item {
+    padding: 6px 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #c9d1d9;
+    border-bottom: 1px solid #161b22;
+    word-break: break-word;
+  }
+  .prompt-item:last-child { border-bottom: none; }
+  .prompt-item .prompt-label { color: #58a6ff; font-size: 10px; margin-bottom: 2px; }
+
+  .prompt-empty {
+    padding: 8px 12px; font-size: 11px; color: #484f58; font-style: italic;
+  }
+
+  .empty-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #484f58;
+    font-size: 14px;
+    font-style: italic;
+  }
+
+  /* --- Cost Bar --- */
+  .cost-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 6px 20px;
+    background: #0d1117;
+    border-top: 1px solid #30363d;
+    font-size: 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    color: #8b949e;
+    flex-shrink: 0;
+  }
+  .cost-bar .cost-item { display: flex; align-items: center; gap: 4px; }
+  .cost-bar .cost-label { color: #484f58; }
+  .cost-bar .cost-value { color: #e6edf3; }
+  .cost-bar .cost-total { color: #3fb950; font-weight: 600; }
+
+  /* --- Agent state dots --- */
+  .terminal-item .state-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .state-dot.active { background: #3fb950; }
+  .state-dot.tool_use { background: #d29922; }
+  .state-dot.idle { background: #484f58; }
+
+  /* --- Plan Panel --- */
+  .plan-panel {
+    border-bottom: 1px solid #30363d;
+    background: #161b22;
+    flex-shrink: 0;
+    display: none;
+  }
+  .plan-panel.visible { display: block; }
+
+  .plan-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: #0d1117;
+    border-bottom: 1px solid #21262d;
+    cursor: pointer;
+    user-select: none;
+  }
+  .plan-header:hover { background: #161b22; }
+
+  .plan-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #b392f0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .plan-toggle { font-size: 10px; color: #484f58; transition: transform 0.15s; }
+  .plan-panel.expanded .plan-toggle { transform: rotate(90deg); }
+
+  .plan-body {
+    display: none;
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+  .plan-panel.expanded .plan-body { display: block; }
+
+  .plan-arch {
+    padding: 6px 16px;
+    font-size: 12px;
+    color: #8b949e;
+    border-bottom: 1px solid #21262d;
+  }
+
+  .plan-task-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 16px;
+    border-bottom: 1px solid #21262d;
+    font-size: 12px;
+  }
+  .plan-task-card:last-child { border-bottom: none; }
+
+  .task-status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 60px;
+    text-align: center;
+  }
+  .task-status-badge.pending { background: #484f58; color: #c9d1d9; }
+  .task-status-badge.scheduled { background: #6e7681; color: #fff; }
+  .task-status-badge.waiting { background: #8957e5; color: #fff; }
+  .task-status-badge.in_progress { background: #1f6feb; color: #fff; }
+  .task-status-badge.running { background: #1f6feb; color: #fff; }
+  .task-status-badge.completed { background: #238636; color: #fff; }
+  .task-status-badge.completed_with_errors { background: #9e6a03; color: #fff; }
+  .task-status-badge.failed { background: #da3633; color: #fff; }
+  .task-status-badge.timed_out { background: #bc4c00; color: #fff; }
+  .task-status-badge.retrying { background: #d29922; color: #fff; animation: pulse 1.5s ease-in-out infinite; }
+  .task-status-badge.cancelled { background: #6e7681; color: #c9d1d9; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .task-info { flex: 1; min-width: 0; }
+  .task-name { font-weight: 600; color: #e6edf3; }
+  .task-role { font-size: 11px; color: #8b949e; font-style: italic; }
+  .task-desc { font-size: 11px; color: #c9d1d9; margin-top: 2px; }
+  .task-deps { font-size: 10px; color: #d29922; margin-top: 2px; }
+  .task-files { font-size: 10px; color: #56d364; margin-top: 1px; font-family: "SF Mono", Menlo, monospace; }
+  .task-retry { font-size: 10px; color: #d29922; margin-top: 2px; }
+  .task-timeout { font-size: 10px; color: #bc4c00; margin-top: 1px; }
+  .task-error { font-size: 10px; color: #da3633; margin-top: 2px; font-style: italic; }
+  .task-optional { font-size: 9px; color: #8957e5; background: rgba(137,87,229,0.15); padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+  .task-elapsed { font-size: 10px; color: #8b949e; margin-top: 1px; }
+
+  /* Workflow timer */
+  .workflow-timer {
+    display: none;
+    padding: 4px 16px;
+    font-size: 11px;
+    color: #8b949e;
+    background: #0d1117;
+    border-bottom: 1px solid #21262d;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  .workflow-timer.visible { display: flex; align-items: center; gap: 8px; }
+  .workflow-timer .timer-label { color: #484f58; }
+  .workflow-timer .timer-value { color: #e6edf3; }
+  .workflow-timer .timer-warn { color: #d29922; }
+  .workflow-timer .timer-bar {
+    flex: 1; height: 4px; background: #21262d; border-radius: 2px; overflow: hidden;
+  }
+  .workflow-timer .timer-fill {
+    height: 100%; background: #3fb950; border-radius: 2px; transition: width 1s linear;
+  }
+  .workflow-timer .timer-fill.warning { background: #d29922; }
+  .workflow-timer .timer-fill.danger { background: #da3633; }
+
+  /* --- Guardrail Results --- */
+  .guardrail-results {
+    border-top: 1px solid #30363d;
+    padding: 8px 16px;
+    background: #0d1117;
+    flex-shrink: 0;
+    display: none;
+  }
+  .guardrail-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #b392f0;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+  }
+  .guardrail-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    font-size: 11px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  /* --- Structured Mode Toggle --- */
+  .controls .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #8b949e;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Nested Claude Code</h1>
+  <div class="status-badge">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Idle</span>
+  </div>
+</header>
+
+<div class="controls">
+  <input type="text" id="goalInput" placeholder="Enter your goal..." />
+  <select id="terminalSelect">
+    <option value="auto">Auto</option>
+    <option value="1">1 Terminal</option>
+    <option value="2">2 Terminals</option>
+    <option value="3">3 Terminals</option>
+    <option value="4">4 Terminals</option>
+    <option value="5">5 Terminals</option>
+    <option value="6">6 Terminals</option>
+  </select>
+  <select id="modelSelect">
+    <option value="sonnet">Sonnet</option>
+    <option value="opus">Opus</option>
+    <option value="haiku">Haiku</option>
+  </select>
+  <select id="iterationSelect">
+    <option value="0">0 Iterations</option>
+    <option value="1">1 Iteration</option>
+    <option value="2">2 Iterations</option>
+    <option value="3">3 Iterations</option>
+    <option value="4">4 Iterations</option>
+    <option value="5">5 Iterations</option>
+  </select>
+  <label class="toggle-label">
+    <input type="checkbox" id="structuredToggle" checked />
+    Structured
+  </label>
+  <button class="btn-start" id="btnStart" onclick="doStart()">Start</button>
+  <button class="btn-stop" id="btnStop" onclick="doStop()" disabled>Stop</button>
+</div>
+
+<div class="workflow-timer" id="workflowTimer">
+  <span class="timer-label">Workflow:</span>
+  <span class="timer-value" id="timerElapsed">0:00</span>
+  <div class="timer-bar"><div class="timer-fill" id="timerFill" style="width:0%"></div></div>
+  <span class="timer-value" id="timerRemaining"></span>
+</div>
+
+<div class="plan-panel" id="planPanel">
+  <div class="plan-header" onclick="togglePlanPanel()">
+    <span class="plan-title" id="planTitle">Execution Plan</span>
+    <span class="plan-toggle" id="planToggle">&#9654;</span>
+  </div>
+  <div class="plan-body" id="planBody"></div>
+</div>
+
+<div class="main">
+  <div class="panel-log">
+    <div class="panel-header">
+      Activity Log
+      <label style="float:right;font-weight:normal;text-transform:none;letter-spacing:0;cursor:pointer;font-size:12px;color:#484f58;">
+        <input type="checkbox" id="rawToggle" style="margin-right:4px;vertical-align:middle;" />raw
+      </label>
+    </div>
+    <div class="log-body" id="logBody">
+      <div class="empty-state">Waiting to start...</div>
+    </div>
+    <div class="log-body" id="rawBody" style="display:none;font-family:'SF Mono',Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;padding:12px 16px;color:#fff;"></div>
+    <div class="guardrail-results" id="guardrailResults"></div>
+    <div class="postcheck-results" id="postcheckResults" style="display:none;"></div>
+  </div>
+  <div class="panel-terminals">
+    <div class="panel-header">Terminals</div>
+    <div class="terminals-list" id="terminalsList">
+      <div class="empty-state" id="terminalsEmpty">None</div>
+    </div>
+  </div>
+</div>
+
+<div class="cost-bar" id="costBar" style="display:none;">
+  <div class="cost-item"><span class="cost-label">In:</span><span class="cost-value" id="costIn">0</span></div>
+  <div class="cost-item"><span class="cost-label">Out:</span><span class="cost-value" id="costOut">0</span></div>
+  <div class="cost-item"><span class="cost-label">Cache R:</span><span class="cost-value" id="costCacheRead">0</span></div>
+  <div class="cost-item"><span class="cost-label">Cache W:</span><span class="cost-value" id="costCacheWrite">0</span></div>
+  <div class="cost-item"><span class="cost-label">Est. Cost:</span><span class="cost-value cost-total" id="costTotal">$0.00</span></div>
+</div>
+
+<script>
+(function() {
+  const goalInput = document.getElementById("goalInput");
+  const terminalSelect = document.getElementById("terminalSelect");
+  const modelSelect = document.getElementById("modelSelect");
+  const iterationSelect = document.getElementById("iterationSelect");
+  const btnStart = document.getElementById("btnStart");
+  const btnStop = document.getElementById("btnStop");
+  const statusDot = document.getElementById("statusDot");
+  const statusText = document.getElementById("statusText");
+  const logBody = document.getElementById("logBody");
+  const rawBody = document.getElementById("rawBody");
+  const rawToggle = document.getElementById("rawToggle");
+  const terminalsList = document.getElementById("terminalsList");
+  const terminalsEmpty = document.getElementById("terminalsEmpty");
+  const postcheckResults = document.getElementById("postcheckResults");
+  const structuredToggle = document.getElementById("structuredToggle");
+  const planPanel = document.getElementById("planPanel");
+  const planBody = document.getElementById("planBody");
+  const planTitle = document.getElementById("planTitle");
+  const guardrailResults = document.getElementById("guardrailResults");
+
+  rawToggle.addEventListener("change", function() {
+    if (rawToggle.checked) {
+      logBody.style.display = "none";
+      rawBody.style.display = "";
+      renderRaw();
+    } else {
+      logBody.style.display = "";
+      rawBody.style.display = "none";
+    }
+  });
+
+  let eventSource = null;
+  let isRunning = false;
+  let currentIter = 0;
+  let totalIters = 0;
+  let currentPhase = "idle";
+  let controllerLines = [];   // raw lines kept for re-parsing on reload
+  let logEntries = [];         // parsed activity entries
+  let terminalPrompts = {};
+  let expandedTerminals = {};
+  let lastSessions = [];
+  let agentStates = {};     // name → { state, tokens }
+  let agentSessionIds = {}; // name → sessionId
+  let terminalOwnership = {};  // name → file/area string
+  let lastThinkTime = 0;
+  let currentPlan = null;       // structured task plan
+  let taskStatusMap = {};       // name → { status, validation, attempts, ... }
+  let workflowStartedAt = null; // timestamp
+  let workflowTimerInterval = null;
+
+  const workflowTimerEl = document.getElementById("workflowTimer");
+  const timerElapsed = document.getElementById("timerElapsed");
+  const timerRemaining = document.getElementById("timerRemaining");
+  const timerFill = document.getElementById("timerFill");
+
+  const costBar = document.getElementById("costBar");
+  const costIn = document.getElementById("costIn");
+  const costOut = document.getElementById("costOut");
+  const costCacheRead = document.getElementById("costCacheRead");
+  const costCacheWrite = document.getElementById("costCacheWrite");
+  const costTotal = document.getElementById("costTotal");
+
+  // Pricing per million tokens by model
+  const MODEL_PRICING = {
+    sonnet: { input: 3.0, output: 15.0, cacheRead: 0.30, cacheCreation: 3.75 },
+    opus:   { input: 15.0, output: 75.0, cacheRead: 1.50, cacheCreation: 18.75 },
+    haiku:  { input: 0.80, output: 4.0, cacheRead: 0.08, cacheCreation: 1.0 },
+  };
+
+  function formatTokens(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+    return String(n);
+  }
+
+  function updateCostBar() {
+    let totalIn = 0, totalOut = 0, totalCR = 0, totalCW = 0;
+    for (const name of Object.keys(agentStates)) {
+      const t = agentStates[name].tokens || {};
+      totalIn += t.input || 0;
+      totalOut += t.output || 0;
+      totalCR += t.cacheRead || 0;
+      totalCW += t.cacheCreation || 0;
+    }
+
+    if (totalIn + totalOut + totalCR + totalCW === 0) {
+      costBar.style.display = "none";
+      return;
+    }
+
+    costBar.style.display = "";
+    costIn.textContent = formatTokens(totalIn);
+    costOut.textContent = formatTokens(totalOut);
+    costCacheRead.textContent = formatTokens(totalCR);
+    costCacheWrite.textContent = formatTokens(totalCW);
+
+    const pricing = MODEL_PRICING[modelSelect.value] || MODEL_PRICING.sonnet;
+    const est = (totalIn * pricing.input + totalOut * pricing.output +
+                 totalCR * pricing.cacheRead + totalCW * pricing.cacheCreation) / 1000000;
+    costTotal.textContent = "$" + est.toFixed(2);
+  }
+
+  // --- Parsing ---
+
+  const cmdRegex = /--cmd\s+(\S+)\s+"([^"]*)"/;
+  const cmdRegexSingle = /--cmd\s+(\S+)\s+'([^']*)'/;
+  const startRegex = /--start\s+(\S+)\s+(\S+)/;
+  const readRegex = /--read\s+(\S+)/;
+  const stopRegex = /--stop\s+(\S+)/;
+  const stopAllRegex = /--stop-all/;
+  const listRegex = /--list/;
+
+  function extractPrompt(line) {
+    let m = cmdRegex.exec(line);
+    if (!m) m = cmdRegexSingle.exec(line);
+    if (m && m[2] !== "") return { name: m[1], text: m[2] };
+    return null;
+  }
+
+  function isNoiseLine(line) {
+    const trimmed = line.trim();
+    if (trimmed.length < 15) return true;
+    if (/^[-=~_#*]{4,}$/.test(trimmed)) return true;
+    if (/^\s*[\[{]/.test(trimmed) && /[\]}]\s*$/.test(trimmed)) return true;
+    if (/^\[tool:\s/.test(trimmed)) return true;
+    if (/^(node|tmux|send-keys|capture-pane|kill-session)/.test(trimmed)) return true;
+    if (/^tmux-control\.cjs/.test(trimmed)) return true;
+    return false;
+  }
+
+  function isVerifyLine(line) {
+    return /VERIFICATION COMPLETE|QA REPORT|REVIEW COMPLETE|ALL CHECKS PASS/i.test(line);
+  }
+
+  function isPlanLine(line) {
+    if (/^\s*\d+[\.\)]\s+\S/.test(line)) return true;
+    if (/\b(break|split|decompos|divid)\w*\s+(the\s+)?work\s+into\b/i.test(line)) return true;
+    if (/\bTerminal\s+\d+\s+will\b/i.test(line)) return true;
+    if (/\b(task decomposition|planning|plan of action|work breakdown)\b/i.test(line)) return true;
+    return false;
+  }
+
+  function isOwnershipLine(line) {
+    return /\bYou own\b/i.test(line);
+  }
+
+  function parseLine(line) {
+    // Review round markers
+    if (line.includes("Mandatory Review Round starting")) {
+      return { type: "review", icon: "*", msg: "Mandatory Review Round starting" };
+    }
+    if (line.includes("Review Round complete")) {
+      return { type: "review", icon: "*", msg: line.trim() };
+    }
+
+    // Post-check markers
+    if (line.includes("[Post-check]")) {
+      return { type: "postcheck", icon: "?", msg: line.replace("[Post-check] ", "").trim() };
+    }
+    if (line.includes("post-build checks")) {
+      return { type: "postcheck", icon: "?", msg: line.trim() };
+    }
+
+    // --start
+    let m = startRegex.exec(line);
+    if (m) return { type: "start", icon: "+", msg: "Started terminal", detail: m[1], dir: m[2] };
+
+    // --cmd with content (skip blank enters)
+    const p = extractPrompt(line);
+    if (p) return { type: "prompt", icon: ">", msg: "Prompt to " + p.name, detail: p.text };
+
+    // --read
+    m = readRegex.exec(line);
+    if (m && !startRegex.test(line)) return { type: "read", icon: "~", msg: "Reading output from " + m[1] };
+
+    // --stop-all
+    if (stopAllRegex.test(line)) return { type: "stop", icon: "x", msg: "Stopping all terminals" };
+
+    // --stop <name>
+    m = stopRegex.exec(line);
+    if (m && !stopAllRegex.test(line)) return { type: "stop", icon: "x", msg: "Stopped terminal " + m[1] };
+
+    // Controller exit
+    if (line.includes("[Controller exited")) return { type: "exit", icon: "!", msg: line.trim() };
+
+    // --- Fallback chain for controller reasoning ---
+
+    // Filter noise
+    if (isNoiseLine(line)) return null;
+
+    // Verification results
+    if (isVerifyLine(line)) return { type: "verify", icon: "\u2713", msg: line.trim() };
+
+    // Plan / task decomposition
+    if (isPlanLine(line)) return { type: "plan", icon: "\u25b8", msg: line.trim() };
+
+    // Ownership declarations (also caught in processLine for terminal labels)
+    if (isOwnershipLine(line)) return { type: "ownership", icon: "\u25cb", msg: line.trim() };
+
+    // Catch-all: remaining meaningful text is controller thinking
+    return { type: "think", icon: "\u25c6", msg: line.trim() };
+  }
+
+  function processLine(line) {
+    // Track prompts
+    const p = extractPrompt(line);
+    if (p) {
+      if (!terminalPrompts[p.name]) terminalPrompts[p.name] = [];
+      terminalPrompts[p.name].push(p.text);
+    }
+
+    // Track --start for immediate sidebar
+    const sm = startRegex.exec(line);
+    if (sm && !lastSessions.includes(sm[1])) {
+      lastSessions.push(sm[1]);
+      renderTerminals(lastSessions);
+    }
+
+    // Extract ownership from prompt text: "You own foo.js"
+    const ownerMatch = /\bYou own\s+(.+)/i.exec(line);
+    if (ownerMatch) {
+      // Try to find which terminal this prompt targets
+      const pm = extractPrompt(line);
+      if (pm) {
+        terminalOwnership[pm.name] = ownerMatch[1].replace(/[."'\s]+$/, "").trim();
+      }
+    }
+
+    // Parse for activity log
+    const entry = parseLine(line);
+    if (entry) {
+      const now = Date.now();
+      entry.time = new Date();
+
+      // Merge consecutive think entries within 500ms
+      if (entry.type === "think" && logEntries.length > 0) {
+        const last = logEntries[logEntries.length - 1];
+        if (last.type === "think" && (now - lastThinkTime) < 500) {
+          last.msg += "\n" + entry.msg;
+          last.merged = true;
+          lastThinkTime = now;
+          return true;
+        }
+      }
+
+      if (entry.type === "think") lastThinkTime = now;
+      logEntries.push(entry);
+      return true;
+    }
+    return false;
+  }
+
+  // --- Time formatting ---
+  function fmtTime(d) {
+    if (!d) return "";
+    const h = d.getHours().toString().padStart(2, "0");
+    const m = d.getMinutes().toString().padStart(2, "0");
+    const s = d.getSeconds().toString().padStart(2, "0");
+    return h + ":" + m + ":" + s;
+  }
+
+  // --- UI ---
+
+  function setRunning(running, phase) {
+    isRunning = running;
+    if (phase) currentPhase = phase;
+
+    // Status dot class
+    let dotClass = "status-dot";
+    if (running) {
+      if (currentPhase === "planning") dotClass += " planning";
+      else if (currentPhase === "review") dotClass += " review";
+      else if (currentPhase === "postcheck") dotClass += " postcheck";
+      else dotClass += " running";
+    }
+    statusDot.className = dotClass;
+
+    // Status text
+    if (!running) {
+      statusText.textContent = "Idle";
+    } else if (currentPhase === "planning") {
+      statusText.textContent = "Planning...";
+    } else if (currentPhase === "review") {
+      statusText.textContent = "Review Round";
+    } else if (currentPhase === "postcheck") {
+      statusText.textContent = "Running Post-Checks";
+    } else if (currentPhase === "iteration" && currentIter > 0) {
+      statusText.textContent = "Iteration " + currentIter + " of " + totalIters;
+    } else if (currentPhase === "build") {
+      statusText.textContent = "Building";
+    } else {
+      statusText.textContent = "Running";
+    }
+
+    btnStart.disabled = running;
+    btnStop.disabled = !running;
+    goalInput.disabled = running;
+    terminalSelect.disabled = running;
+    modelSelect.disabled = running;
+    iterationSelect.disabled = running;
+    structuredToggle.disabled = running;
+  }
+
+  function isNearBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  }
+
+  function renderRaw() {
+    const wasNear = isNearBottom(rawBody);
+    rawBody.textContent = controllerLines.join("\n");
+    if (wasNear) rawBody.scrollTop = rawBody.scrollHeight;
+  }
+
+  function renderLog() {
+    if (logEntries.length === 0) {
+      logBody.innerHTML = '<div class="empty-state">Waiting to start...</div>';
+      return;
+    }
+
+    const wasNear = isNearBottom(logBody);
+
+    // Only append new entries (keep existing DOM nodes)
+    const existingNodes = logBody.querySelectorAll(".log-entry");
+    const rendered = existingNodes.length;
+
+    // Check if last entry was merged — update its DOM node
+    if (rendered > 0 && logEntries.length >= rendered) {
+      const lastEntry = logEntries[rendered - 1];
+      if (lastEntry.merged) {
+        const lastNode = existingNodes[rendered - 1];
+        const msgEl = lastNode.querySelector(".log-msg");
+        if (msgEl) msgEl.textContent = lastEntry.msg;
+      }
+    }
+
+    for (let i = rendered; i < logEntries.length; i++) {
+      const e = logEntries[i];
+      const row = document.createElement("div");
+      row.className = "log-entry type-" + e.type;
+
+      const time = document.createElement("span");
+      time.className = "log-time";
+      time.textContent = fmtTime(e.time);
+
+      const icon = document.createElement("span");
+      icon.className = "log-icon";
+      icon.textContent = e.icon;
+
+      const msg = document.createElement("span");
+      msg.className = "log-msg";
+      msg.textContent = e.msg;
+
+      if (e.detail) {
+        const detail = document.createElement("div");
+        detail.className = "log-detail";
+        detail.textContent = e.detail;
+        msg.appendChild(detail);
+      }
+
+      row.appendChild(time);
+      row.appendChild(icon);
+      row.appendChild(msg);
+      logBody.appendChild(row);
+    }
+
+    if (wasNear) logBody.scrollTop = logBody.scrollHeight;
+  }
+
+  function renderPostChecks(checks) {
+    if (!checks || checks.length === 0) {
+      postcheckResults.style.display = "none";
+      return;
+    }
+
+    postcheckResults.style.display = "";
+    postcheckResults.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "postcheck-title";
+    title.textContent = "Post-Build Checks";
+    postcheckResults.appendChild(title);
+
+    for (const c of checks) {
+      const item = document.createElement("div");
+      item.className = "postcheck-item";
+
+      const badge = document.createElement("span");
+      badge.className = "postcheck-badge " + (c.pass ? "pass" : "fail");
+      badge.textContent = c.pass ? "PASS" : "FAIL";
+
+      const name = document.createElement("span");
+      name.className = "postcheck-name";
+      name.textContent = c.check;
+
+      const msg = document.createElement("span");
+      msg.className = "postcheck-msg";
+      msg.textContent = " — " + c.msg;
+
+      item.appendChild(badge);
+      item.appendChild(name);
+      item.appendChild(msg);
+      postcheckResults.appendChild(item);
+    }
+  }
+
+  // --- Plan Panel ---
+
+  window.togglePlanPanel = function() {
+    planPanel.classList.toggle("expanded");
+  };
+
+  function renderPlan(plan) {
+    if (!plan || !plan.tasks) {
+      planPanel.classList.remove("visible");
+      return;
+    }
+    currentPlan = plan;
+    planPanel.classList.add("visible", "expanded");
+    planTitle.textContent = "Execution Plan (" + plan.tasks.length + " tasks)";
+    planBody.innerHTML = "";
+
+    if (plan.architecture) {
+      const arch = document.createElement("div");
+      arch.className = "plan-arch";
+      arch.textContent = plan.architecture;
+      planBody.appendChild(arch);
+    }
+
+    for (const task of plan.tasks) {
+      const card = document.createElement("div");
+      card.className = "plan-task-card";
+      card.id = "plan-task-" + task.name;
+
+      const tsInfo = taskStatusMap[task.name] || {};
+      const status = tsInfo.status || "pending";
+      const badge = document.createElement("span");
+      badge.className = "task-status-badge " + status;
+      badge.textContent = status.replace(/_/g, " ");
+
+      const info = document.createElement("div");
+      info.className = "task-info";
+
+      const nameRow = document.createElement("div");
+      const nameEl = document.createElement("span");
+      nameEl.className = "task-name";
+      nameEl.textContent = task.name;
+      nameRow.appendChild(nameEl);
+
+      if (task.optional) {
+        const optBadge = document.createElement("span");
+        optBadge.className = "task-optional";
+        optBadge.textContent = "optional";
+        nameRow.appendChild(optBadge);
+      }
+      info.appendChild(nameRow);
+
+      if (task.role) {
+        const role = document.createElement("div");
+        role.className = "task-role";
+        role.textContent = task.role;
+        info.appendChild(role);
+      }
+
+      const desc = document.createElement("div");
+      desc.className = "task-desc";
+      desc.textContent = task.description;
+      info.appendChild(desc);
+
+      if (task.dependencies && task.dependencies.length > 0) {
+        const deps = document.createElement("div");
+        deps.className = "task-deps";
+        deps.textContent = "depends on: " + task.dependencies.join(", ");
+        info.appendChild(deps);
+      }
+
+      if (task.ownedFiles && task.ownedFiles.length > 0) {
+        const files = document.createElement("div");
+        files.className = "task-files";
+        files.textContent = task.ownedFiles.join(", ");
+        info.appendChild(files);
+      }
+
+      // Retry info
+      if (tsInfo.attempts > 1 || (task.retryCount && task.retryCount > 0)) {
+        const retry = document.createElement("div");
+        retry.className = "task-retry";
+        const attempts = tsInfo.attempts || 0;
+        const maxAttempts = tsInfo.maxAttempts || (task.retryCount || 0) + 1;
+        retry.textContent = "attempt " + attempts + "/" + maxAttempts;
+        if (task.retryLogic) retry.textContent += " (" + task.retryLogic + ")";
+        info.appendChild(retry);
+      }
+
+      // Timeout info
+      if (task.timeoutSeconds && task.timeoutSeconds > 0) {
+        const timeout = document.createElement("div");
+        timeout.className = "task-timeout";
+        const tmins = Math.round(task.timeoutSeconds / 60);
+        timeout.textContent = "timeout: " + tmins + "min";
+        if (tsInfo.startedAt && status === "in_progress") {
+          timeout.textContent += " (" + fmtElapsed(tsInfo.startedAt) + " elapsed)";
+        }
+        info.appendChild(timeout);
+      }
+
+      // Error message
+      if (tsInfo.error) {
+        const errEl = document.createElement("div");
+        errEl.className = "task-error";
+        errEl.textContent = tsInfo.error;
+        info.appendChild(errEl);
+      }
+
+      card.appendChild(badge);
+      card.appendChild(info);
+      planBody.appendChild(card);
+    }
+  }
+
+  function updateTaskStatusBadges(statusMap) {
+    taskStatusMap = statusMap;
+    for (const [name, info] of Object.entries(statusMap)) {
+      const card = document.getElementById("plan-task-" + name);
+      if (card) {
+        const badge = card.querySelector(".task-status-badge");
+        if (badge) {
+          badge.className = "task-status-badge " + info.status;
+          badge.textContent = info.status.replace(/_/g, " ");
+        }
+
+        // Update retry info
+        const retryEl = card.querySelector(".task-retry");
+        if (retryEl && info.attempts !== undefined) {
+          retryEl.textContent = "attempt " + info.attempts + "/" + info.maxAttempts;
+          if (info.retryLogic) retryEl.textContent += " (" + info.retryLogic + ")";
+        }
+
+        // Update timeout elapsed
+        const timeoutEl = card.querySelector(".task-timeout");
+        if (timeoutEl && info.startedAt && info.status === "in_progress") {
+          const task = currentPlan && currentPlan.tasks.find(t => t.name === name);
+          if (task && task.timeoutSeconds) {
+            const tmins = Math.round(task.timeoutSeconds / 60);
+            timeoutEl.textContent = "timeout: " + tmins + "min (" + fmtElapsed(info.startedAt) + " elapsed)";
+          }
+        }
+
+        // Update error message
+        let errEl = card.querySelector(".task-error");
+        if (info.error) {
+          if (!errEl) {
+            errEl = document.createElement("div");
+            errEl.className = "task-error";
+            card.querySelector(".task-info").appendChild(errEl);
+          }
+          errEl.textContent = info.error;
+        } else if (errEl) {
+          errEl.remove();
+        }
+      }
+    }
+  }
+
+  function renderGuardrailResults(results) {
+    if (!results || Object.keys(results).length === 0) {
+      guardrailResults.style.display = "none";
+      return;
+    }
+    guardrailResults.style.display = "";
+    guardrailResults.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "guardrail-title";
+    title.textContent = "Guardrail Validation";
+    guardrailResults.appendChild(title);
+
+    for (const [name, result] of Object.entries(results)) {
+      const failures = [
+        ...(result.files || []).filter(f => !f.pass).map(f => "missing: " + f.file),
+        ...(result.exports || []).filter(e => !e.found).map(e => "export: " + e.export),
+        ...(result.patterns || []).filter(p => !p.matched).map(p => "pattern: " + p.pattern),
+      ];
+      const allPass = failures.length === 0;
+
+      const item = document.createElement("div");
+      item.className = "guardrail-item";
+
+      const badge = document.createElement("span");
+      badge.className = "postcheck-badge " + (allPass ? "pass" : "fail");
+      badge.textContent = allPass ? "PASS" : "FAIL";
+
+      const label = document.createElement("span");
+      label.className = "postcheck-name";
+      label.textContent = name;
+
+      item.appendChild(badge);
+      item.appendChild(label);
+
+      if (!allPass) {
+        const msg = document.createElement("span");
+        msg.className = "postcheck-msg";
+        msg.textContent = " - " + failures.join(", ");
+        item.appendChild(msg);
+      }
+
+      guardrailResults.appendChild(item);
+    }
+  }
+
+  function renderTerminals(sessions) {
+    lastSessions = sessions || [];
+    if (!sessions || sessions.length === 0) {
+      terminalsEmpty.style.display = "";
+      terminalsList.querySelectorAll(".terminal-count, .terminal-card").forEach(el => el.remove());
+      return;
+    }
+
+    terminalsEmpty.style.display = "none";
+    terminalsList.querySelectorAll(".terminal-count, .terminal-card").forEach(el => el.remove());
+
+    const countEl = document.createElement("div");
+    countEl.className = "terminal-count";
+    countEl.textContent = sessions.length + " active terminal" + (sessions.length !== 1 ? "s" : "");
+    terminalsList.appendChild(countEl);
+
+    for (const name of sessions) {
+      const prompts = terminalPrompts[name] || [];
+      const isExpanded = expandedTerminals[name] || false;
+
+      const card = document.createElement("div");
+      card.className = "terminal-card" + (isExpanded ? " expanded" : "");
+
+      const item = document.createElement("div");
+      item.className = "terminal-item";
+      const agentState = (agentStates[name] || {}).state || "idle";
+      const ownership = terminalOwnership[name];
+      item.innerHTML =
+        '<span class="state-dot ' + agentState + '" title="' + agentState + '"></span>' +
+        '<span class="name">' + escapeHtml(name) + '</span>' +
+        (ownership ? '<span class="terminal-ownership">' + escapeHtml(ownership) + '</span>' : '') +
+        (prompts.length > 0 ? '<span class="prompt-count">' + prompts.length + '</span>' : '') +
+        '<span class="chevron">&#9654;</span>';
+      item.onclick = function() {
+        expandedTerminals[name] = !expandedTerminals[name];
+        renderTerminals(sessions);
+      };
+
+      const promptsEl = document.createElement("div");
+      promptsEl.className = "terminal-prompts";
+
+      if (prompts.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "prompt-empty";
+        empty.textContent = "No prompts sent yet";
+        promptsEl.appendChild(empty);
+      } else {
+        for (let i = 0; i < prompts.length; i++) {
+          const pEl = document.createElement("div");
+          pEl.className = "prompt-item";
+          const label = document.createElement("div");
+          label.className = "prompt-label";
+          label.textContent = "#" + (i + 1);
+          const text = document.createElement("div");
+          text.textContent = prompts[i];
+          pEl.appendChild(label);
+          pEl.appendChild(text);
+          promptsEl.appendChild(pEl);
+        }
+      }
+
+      card.appendChild(item);
+      card.appendChild(promptsEl);
+      terminalsList.appendChild(card);
+    }
+
+    // Show restore buttons for sessions that have a known sessionId but are missing from tmux
+    for (const name of Object.keys(agentSessionIds)) {
+      if (!sessions.includes(name)) {
+        const card = document.createElement("div");
+        card.className = "terminal-card";
+        card.style.opacity = "0.6";
+
+        const item = document.createElement("div");
+        item.className = "terminal-item";
+        item.style.justifyContent = "space-between";
+        item.innerHTML =
+          '<span class="state-dot idle"></span>' +
+          '<span class="name" style="color:#8b949e;text-decoration:line-through;">' + escapeHtml(name) + '</span>';
+
+        const restoreBtn = document.createElement("button");
+        restoreBtn.textContent = "Restore";
+        restoreBtn.style.cssText = "background:#d29922;color:#fff;border:none;border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;";
+        restoreBtn.onclick = function(e) {
+          e.stopPropagation();
+          restoreSession(name);
+        };
+        item.appendChild(restoreBtn);
+
+        card.appendChild(item);
+        terminalsList.appendChild(card);
+      }
+    }
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // --- Workflow Timer ---
+
+  function startWorkflowTimer() {
+    stopWorkflowTimer();
+    if (!workflowStartedAt) return;
+
+    workflowTimerEl.classList.add("visible");
+    workflowTimerInterval = setInterval(updateWorkflowTimer, 1000);
+    updateWorkflowTimer();
+  }
+
+  function stopWorkflowTimer() {
+    if (workflowTimerInterval) {
+      clearInterval(workflowTimerInterval);
+      workflowTimerInterval = null;
+    }
+  }
+
+  function updateWorkflowTimer() {
+    if (!workflowStartedAt) {
+      workflowTimerEl.classList.remove("visible");
+      return;
+    }
+
+    const elapsed = Math.round((Date.now() - workflowStartedAt) / 1000);
+    const mins = Math.floor(elapsed / 60);
+    const secs = elapsed % 60;
+    timerElapsed.textContent = mins + ":" + secs.toString().padStart(2, "0");
+
+    const timeoutSeconds = currentPlan && currentPlan.timeoutSeconds ? currentPlan.timeoutSeconds : 0;
+    if (timeoutSeconds > 0) {
+      const remaining = Math.max(0, timeoutSeconds - elapsed);
+      const rmins = Math.floor(remaining / 60);
+      const rsecs = remaining % 60;
+      timerRemaining.textContent = rmins + ":" + rsecs.toString().padStart(2, "0") + " left";
+
+      const pct = Math.min(100, (elapsed / timeoutSeconds) * 100);
+      timerFill.style.width = pct + "%";
+      timerFill.className = "timer-fill" + (pct > 90 ? " danger" : pct > 70 ? " warning" : "");
+    } else {
+      timerRemaining.textContent = "";
+      timerFill.style.width = "0%";
+    }
+  }
+
+  function fmtElapsed(startedAt) {
+    if (!startedAt) return "";
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+    if (elapsed < 60) return elapsed + "s";
+    return Math.floor(elapsed / 60) + "m " + (elapsed % 60) + "s";
+  }
+
+  // --- SSE ---
+
+  function connectSSE() {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource("/api/stream");
+
+    eventSource.addEventListener("init", function(e) {
+      const data = JSON.parse(e.data);
+      currentIter = data.currentIteration || 0;
+      totalIters = data.iterations || 0;
+      currentPhase = data.phase || "idle";
+      setRunning(data.running, data.phase);
+      if (data.goal) goalInput.value = data.goal;
+      if (data.terminalCount) terminalSelect.value = String(data.terminalCount);
+      if (data.model) modelSelect.value = data.model;
+      if (data.iterations !== undefined) iterationSelect.value = String(data.iterations);
+
+      // Re-parse all buffered lines into log entries
+      controllerLines = data.controllerOutput || [];
+      logEntries = [];
+      terminalPrompts = {};
+      logBody.innerHTML = "";
+      for (const line of controllerLines) {
+        processLine(line);
+      }
+      renderLog();
+      renderTerminals(data.sessions);
+      if (data.postChecks) renderPostChecks(data.postChecks);
+      if (data.taskPlan) renderPlan(data.taskPlan);
+      if (data.taskStatus) updateTaskStatusBadges(data.taskStatus);
+
+      // Start workflow timer if running
+      if (data.workflowStartedAt) {
+        workflowStartedAt = data.workflowStartedAt;
+        if (data.running) startWorkflowTimer();
+      }
+    });
+
+    eventSource.addEventListener("controller", function(e) {
+      const data = JSON.parse(e.data);
+      controllerLines.push(data.line);
+      if (controllerLines.length > 500) controllerLines.shift();
+
+      const hadNewEntry = processLine(data.line);
+      if (hadNewEntry) renderLog();
+      if (rawToggle.checked) renderRaw();
+
+      // Re-render sidebar if prompt detected
+      if (extractPrompt(data.line)) {
+        renderTerminals(lastSessions);
+      }
+    });
+
+    eventSource.addEventListener("terminals", function(e) {
+      const data = JSON.parse(e.data);
+      renderTerminals(data.sessions);
+    });
+
+    eventSource.addEventListener("status", function(e) {
+      const data = JSON.parse(e.data);
+      if (data.currentIteration !== undefined) currentIter = data.currentIteration;
+      if (data.iterations !== undefined) totalIters = data.iterations;
+      setRunning(data.running, data.phase);
+      if (!data.running) {
+        renderTerminals([]);
+        stopWorkflowTimer();
+        workflowTimerEl.classList.remove("visible");
+      }
+      if (data.postChecks) renderPostChecks(data.postChecks);
+      if (data.workflowStartedAt) {
+        workflowStartedAt = data.workflowStartedAt;
+        startWorkflowTimer();
+      }
+    });
+
+    eventSource.addEventListener("postChecks", function(e) {
+      const data = JSON.parse(e.data);
+      renderPostChecks(data.checks);
+    });
+
+    eventSource.addEventListener("plan", function(e) {
+      const data = JSON.parse(e.data);
+      renderPlan(data.plan);
+    });
+
+    eventSource.addEventListener("taskStatus", function(e) {
+      const data = JSON.parse(e.data);
+      updateTaskStatusBadges(data.taskStatus);
+    });
+
+    eventSource.addEventListener("guardrails", function(e) {
+      const data = JSON.parse(e.data);
+      renderGuardrailResults(data.results);
+    });
+
+    eventSource.addEventListener("agentState", function(e) {
+      const data = JSON.parse(e.data);
+      agentStates[data.name] = { state: data.state, tokens: data.tokens };
+      renderTerminals(lastSessions);
+      updateCostBar();
+    });
+
+    eventSource.addEventListener("sessionMapped", function(e) {
+      const data = JSON.parse(e.data);
+      agentSessionIds[data.name] = data.sessionId;
+    });
+
+    eventSource.onerror = function() {};
+  }
+
+  // --- Restore ---
+
+  async function restoreSession(name) {
+    try {
+      const res = await fetch("/api/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (!res.ok) alert(data.error || "Restore failed");
+    } catch (err) {
+      alert("Failed to restore session");
+    }
+  }
+
+  // --- Actions ---
+
+  window.doStart = async function() {
+    const goal = goalInput.value.trim();
+    if (!goal) { goalInput.focus(); return; }
+
+    const terminalCount = terminalSelect.value;
+    const model = modelSelect.value;
+    const iterations = parseInt(iterationSelect.value) || 0;
+    currentIter = 0;
+    totalIters = iterations;
+    currentPhase = "build";
+    controllerLines = [];
+    logEntries = [];
+    terminalPrompts = {};
+    expandedTerminals = {};
+    agentStates = {};
+    agentSessionIds = {};
+    terminalOwnership = {};
+    lastThinkTime = 0;
+    currentPlan = null;
+    taskStatusMap = {};
+    workflowStartedAt = null;
+    stopWorkflowTimer();
+    workflowTimerEl.classList.remove("visible");
+    logBody.innerHTML = "";
+    renderTerminals([]);
+    postcheckResults.style.display = "none";
+    postcheckResults.innerHTML = "";
+    guardrailResults.style.display = "none";
+    guardrailResults.innerHTML = "";
+    planPanel.classList.remove("visible", "expanded");
+    planBody.innerHTML = "";
+    costBar.style.display = "none";
+
+    const structured = structuredToggle.checked;
+
+    try {
+      const res = await fetch("/api/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goal, terminalCount, model, iterations, structured }),
+      });
+      const data = await res.json();
+      if (!res.ok) alert(data.error || "Failed to start");
+    } catch (err) {
+      alert("Failed to connect to server");
+    }
+  };
+
+  window.doStop = async function() {
+    try { await fetch("/api/stop", { method: "POST" }); } catch (_) {}
+  };
+
+  goalInput.addEventListener("keydown", function(e) {
+    if (e.key === "Enter" && !isRunning) doStart();
+  });
+
+  // --- Init ---
+  fetch("/api/status")
+    .then(r => r.json())
+    .then(data => {
+      currentIter = data.currentIteration || 0;
+      totalIters = data.iterations || 0;
+      currentPhase = data.phase || "idle";
+      setRunning(data.running, data.phase);
+      if (data.goal) goalInput.value = data.goal;
+      if (data.terminalCount) terminalSelect.value = String(data.terminalCount);
+      if (data.model) modelSelect.value = data.model;
+      if (data.iterations !== undefined) iterationSelect.value = String(data.iterations);
+      if (data.postChecks) renderPostChecks(data.postChecks);
+    })
+    .catch(() => {})
+    .finally(() => connectSSE());
+
+})();
+</script>
+
+</body>
+</html>
