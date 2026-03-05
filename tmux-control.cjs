@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+/**
+ * @deprecated Use terminal-manager.cjs instead.
+ * This tmux-based backend is preserved as a fallback for environments where
+ * node-pty fails to build (native addon). Enable with: TMUX_FALLBACK=1
+ *
+ * terminal-manager.cjs provides the same API surface using node-pty,
+ * eliminating the tmux dependency for cross-platform support.
+ */
 "use strict";
 
 const { execSync } = require("child_process");

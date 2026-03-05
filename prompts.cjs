@@ -9,7 +9,7 @@ const { buildWorkerPrompt, formatExecutionOrder } = require("./task-schema.cjs")
  * Used by both server.cjs and start.cjs.
  */
 
-function buildSystemPrompt(tmuxControlPath) {
+function buildSystemPrompt(terminalControlPath) {
   return `You are a senior staff software engineer and expert technical lead. Your role is to decompose complex projects into parallel workstreams and delegate them across multiple Claude Code terminals. You think architecturally — breaking systems into clean modules with clear interfaces — and you manage your team of AI coders like a seasoned engineering manager: precise task assignments, clear ownership boundaries, and aggressive parallelization. You never do the coding yourself — you delegate everything and monitor progress.
 
 ## CRITICAL: Autonomous execution mode
@@ -17,57 +17,57 @@ function buildSystemPrompt(tmuxControlPath) {
 You are running NON-INTERACTIVELY. There is no human to ask questions to. You MUST:
 - Make all decisions yourself — do NOT ask clarifying questions
 - Do NOT use AskUserQuestion, brainstorming skills, or any interactive tools
-- Do NOT invoke any skills or superpowers — just use Bash to run tmux-control.cjs commands
+- Do NOT invoke any skills or superpowers — just use Bash to run terminal control commands
 - Interpret the goal as best you can and execute immediately
 - If the goal is ambiguous, make reasonable choices and build something great
-- Your ONLY tools are: Bash (to run tmux-control.cjs commands and other shell commands)
+- Your ONLY tools are: Bash (to run terminal control commands and other shell commands)
 - Start working IMMEDIATELY — no planning phases, no questions, no delays
 
 You have the following tool available — a CLI script you run via shell:
 
-## tmux-control.cjs commands
+## Terminal control commands
 
-# Start a new terminal (creates a tmux session with Claude Code-ready env)
-node ${tmuxControlPath} --start <name> <working-dir>
+# Start a new terminal (spawns a Claude Code-ready environment)
+node ${terminalControlPath} --start <name> <working-dir>
 
 # Send a command to a terminal
-node ${tmuxControlPath} --cmd <name> "your instruction here"
+node ${terminalControlPath} --cmd <name> "your instruction here"
 
 # Send blank Enter (accept prompts, approve plans, dismiss ghost text)
-node ${tmuxControlPath} --cmd <name> ""
+node ${terminalControlPath} --cmd <name> ""
 
 # Read output from a terminal (default 50 lines, or specify count)
-node ${tmuxControlPath} --read <name>
-node ${tmuxControlPath} --read <name> 100
+node ${terminalControlPath} --read <name>
+node ${terminalControlPath} --read <name> 100
 
 # Stop a specific terminal
-node ${tmuxControlPath} --stop <name>
+node ${terminalControlPath} --stop <name>
 
 # Stop all terminals
-node ${tmuxControlPath} --stop-all
+node ${terminalControlPath} --stop-all
 
 # List active terminals
-node ${tmuxControlPath} --list
+node ${terminalControlPath} --list
 
 # Create a git worktree for an agent (isolates file changes per worker)
-node ${tmuxControlPath} --worktree <name> <project-dir>
+node ${terminalControlPath} --worktree <name> <project-dir>
 # Prints the worktree path to stdout — use it as the working-dir for --start
 
 # Restore a crashed session using its Claude session ID
-node ${tmuxControlPath} --restore <name> <sessionId> <working-dir>
+node ${terminalControlPath} --restore <name> <sessionId> <working-dir>
 
 # Clean up all worktrees and cc-* branches
-node ${tmuxControlPath} --cleanup-worktrees <project-dir>
+node ${terminalControlPath} --cleanup-worktrees <project-dir>
 
 # Inter-agent messaging — send a message to the shared message board
-node ${tmuxControlPath} --msg write <from-name> <to-name> "message content"
+node ${terminalControlPath} --msg write <from-name> <to-name> "message content"
 # Use "*" as to-name to broadcast to all workers
 
 # Read messages for a specific terminal
-node ${tmuxControlPath} --msg read <name>
+node ${terminalControlPath} --msg read <name>
 
 # Read all messages
-node ${tmuxControlPath} --msg read-all
+node ${terminalControlPath} --msg read-all
 
 ## Workflow
 
@@ -218,7 +218,7 @@ function buildModelInstruction(model) {
  * Build a planning-phase prompt that instructs the controller to output a JSON plan.
  * This is a separate, focused invocation — no terminals are started.
  */
-function buildPlanningPrompt(tmuxControlPath, goal, memoryContext, terminalInstruction, modelInstruction) {
+function buildPlanningPrompt(terminalControlPath, goal, memoryContext, terminalInstruction, modelInstruction) {
   return `You are a senior staff software engineer and expert technical lead planning a project.
 
 ## Your Task
@@ -296,8 +296,8 @@ Output ONLY the JSON plan inside a \`\`\`json code block. No other text before o
  * Build an execution prompt from a validated plan.
  * The controller receives the plan as structured context and executes it.
  */
-function buildExecutionPrompt(tmuxControlPath, plan, memoryContext, modelInstruction) {
-  const systemPrompt = buildSystemPrompt(tmuxControlPath);
+function buildExecutionPrompt(terminalControlPath, plan, memoryContext, modelInstruction) {
+  const systemPrompt = buildSystemPrompt(terminalControlPath);
 
   const taskSummary = plan.tasks.map(t =>
     `- **${t.name}** (${t.role || "worker"}): ${t.description}${t.dependencies && t.dependencies.length > 0 ? ` [depends on: ${t.dependencies.join(", ")}]` : ""}`
