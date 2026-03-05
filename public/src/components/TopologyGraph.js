@@ -14,7 +14,7 @@ function formatTokens(n) {
   return String(n);
 }
 
-function getNodeState(name, agentStates, taskStatus) {
+function getNodeState(name, agentStates, taskStatus, queuedTasks) {
   const agent = agentStates[name];
   const task = taskStatus[name];
   if (agent && agent.state && agent.state !== 'idle') return agent.state;
@@ -27,6 +27,8 @@ function getNodeState(name, agentStates, taskStatus) {
     if (task.status === 'timed_out') return 'timed_out';
     if (task.status === 'completed_with_errors') return 'completed';
   }
+  // Check if task is queued (ready but waiting for concurrency slot)
+  if (queuedTasks && queuedTasks.includes(name)) return 'queued';
   return 'idle';
 }
 
@@ -35,7 +37,7 @@ function stateColor(state) {
     active: 'var(--state-active)', thinking: 'var(--state-thinking)',
     tool_use: 'var(--state-tool-use)', waiting: 'var(--state-waiting)',
     completed: 'var(--state-completed)', failed: 'var(--state-failed)',
-    timed_out: '#ff9800',
+    timed_out: '#ff9800', queued: '#ab47bc',
     retrying: 'var(--state-retrying)', idle: 'var(--state-idle)',
     human: 'var(--state-human)',
   };
@@ -55,6 +57,7 @@ export function TopologyGraph() {
   const logEntries = useStore(s => s.logEntries);
   const selectedAgent = useStore(s => s.selectedAgent);
   const forceCanvas = useStore(s => s.forceCanvasGraph);
+  const queuedTasks = useStore(s => s.queuedTasks);
   const containerRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 500 });
 
@@ -91,6 +94,7 @@ export function TopologyGraph() {
         logEntries=${logEntries}
         selectedAgent=${selectedAgent}
         onSelectAgent=${handleSelectAgent}
+        queuedTasks=${queuedTasks}
       />
     </div>`;
   }
@@ -137,7 +141,7 @@ export function TopologyGraph() {
 
         <!-- Nodes -->
         ${nodes.map(n => {
-          const state = getNodeState(n.name, agentStates, taskStatus);
+          const state = getNodeState(n.name, agentStates, taskStatus, queuedTasks);
           const tokens = agentStates[n.name]?.tokens || {};
           const totalTok = (tokens.input || 0) + (tokens.output || 0);
           const isSelected = selectedAgent === n.name;

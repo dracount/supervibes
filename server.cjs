@@ -400,6 +400,7 @@ function retryWorkerTask(task) {
 function createConductor(plan) {
   const conductor = new ConductorExecutor(plan, {
     findProjectDir,
+    maxConcurrentAgents: sm.maxConcurrentAgents,
   });
 
   // Wire conductor events to SSE broadcasting
@@ -1539,12 +1540,16 @@ const server = http.createServer(async (req, res) => {
     const iterations = Math.min(Math.max(parseInt(body.iterations) || 0, 0), 5);
 
     const structured = body.structured !== false; // default true
+    const maxConcurrentAgents = body.maxConcurrentAgents
+      ? Math.max(1, parseInt(body.maxConcurrentAgents, 10))
+      : undefined;
 
     sm.iterations = iterations;
     sm.currentIteration = 0;
     sm.stopped = false;
     sm.reviewDone = false;
     sm.postChecks = null;
+    sm.maxConcurrentAgents = maxConcurrentAgents; // Store for conductor creation
     state.guardrailResults = null;
     state.restoreAttempts = {};
     state.taskPlan = null;

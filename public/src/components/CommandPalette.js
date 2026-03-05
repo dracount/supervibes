@@ -79,6 +79,11 @@ function buildActions() {
     action: () => setState({ showHistory: true, showCommandPalette: false }),
   });
   actions.push({
+    id: 'view:analytics', icon: '\u2261', label: 'View Analytics', shortcut: '\u2318A',
+    category: 'view',
+    action: () => setState({ showAnalytics: true, showCommandPalette: false }),
+  });
+  actions.push({
     id: 'view:deselect', icon: '\u2715', label: 'Deselect agent', shortcut: 'Esc',
     category: 'view',
     action: () => setState({ selectedAgent: null, showCommandPalette: false }),

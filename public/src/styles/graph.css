@@ -38,6 +38,7 @@
 .graph-node.state-completed rect  { stroke: var(--state-completed); }
 .graph-node.state-failed rect     { stroke: var(--state-failed); filter: drop-shadow(0 0 6px var(--state-failed)); }
 .graph-node.state-retrying rect   { stroke: var(--state-retrying); }
+.graph-node.state-queued rect     { stroke: #ab47bc; stroke-dasharray: 4 2; animation: queuedPulse 2s infinite; }
 .graph-node.state-idle rect       { stroke: var(--state-idle); }
 .graph-node.state-human rect      { stroke: var(--state-human); filter: drop-shadow(0 0 8px var(--state-human)); }
 
@@ -55,6 +56,11 @@
 
 @keyframes dash-flow {
   to { stroke-dashoffset: -10; }
+}
+
+@keyframes queuedPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 @keyframes ctxPulseDetail {

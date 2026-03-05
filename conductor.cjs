@@ -51,6 +51,11 @@ class ConductorExecutor extends EventEmitter {
     this._stopped = false;
     this._findProjectDir = options.findProjectDir || (() => null);
 
+    // Concurrency limiter
+    this._maxConcurrent = options.maxConcurrentAgents
+      || plan.maxConcurrentAgents
+      || Infinity;
+
     // File change tracking
     this._watchers = new Map();       // taskName -> fs.FSWatcher
     this._fileChanges = [];           // capped at 500
@@ -139,6 +144,109 @@ class ConductorExecutor extends EventEmitter {
    */
   getRetryQueueLength() {
     return this.retryQueue.length;
+  }
+
+  // ---- Concurrency ----
+
+  /**
+   * Get current max concurrent agents setting.
+   * @returns {number}
+   */
+  getMaxConcurrent() {
+    return this._maxConcurrent;
+  }
+
+  /**
+   * Set max concurrent agents at runtime.
+   * @param {number} n
+   */
+  setMaxConcurrent(n) {
+    this._maxConcurrent = n > 0 ? n : Infinity;
+  }
+
+  /**
+   * Get count of currently in-progress tasks.
+   * @returns {number}
+   */
+  getActiveCount() {
+    return Object.values(this.taskStatus)
+      .filter(ts => ts.status === TASK_STATES.IN_PROGRESS).length;
+  }
+
+  /**
+   * Returns tasks that are ready to start, respecting concurrency limit.
+   * Retry tasks get priority over new tasks.
+   * @returns {string[]} task names eligible to start
+   */
+  getReadyTasks() {
+    const inProgress = this.getActiveCount();
+    if (inProgress >= this._maxConcurrent) return [];
+
+    const slots = this._maxConcurrent - inProgress;
+    const ready = [];
+
+    // Priority 1: Retrying tasks that have been rescheduled (SCHEDULED after retry)
+    for (const task of this.plan.tasks) {
+      if (ready.length >= slots) break;
+      const ts = this.taskStatus[task.name];
+      if (!ts) continue;
+      if (ts.status !== TASK_STATES.SCHEDULED) continue;
+      if (ts.attempts > 1) {
+        // This is a retry — give it priority
+        ready.push(task.name);
+      }
+    }
+
+    // Priority 2: New tasks with dependencies met
+    for (const task of this.plan.tasks) {
+      if (ready.length >= slots) break;
+      const ts = this.taskStatus[task.name];
+      if (!ts) continue;
+      if (ts.status !== TASK_STATES.PENDING && ts.status !== TASK_STATES.SCHEDULED) continue;
+      if (ready.includes(task.name)) continue;
+      if (!this._dependenciesMet(task)) continue;
+      ready.push(task.name);
+    }
+
+    return ready;
+  }
+
+  /**
+   * Check if all dependencies for a task are met.
+   * @private
+   * @param {Object} task - task from plan
+   * @returns {boolean}
+   */
+  _dependenciesMet(task) {
+    if (!task.dependencies || task.dependencies.length === 0) return true;
+    for (const dep of task.dependencies) {
+      const depTs = this.taskStatus[dep];
+      if (!depTs) return false;
+      if (depTs.status !== TASK_STATES.COMPLETED &&
+          depTs.status !== TASK_STATES.COMPLETED_WITH_ERRORS) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Get tasks that are ready but waiting for a concurrency slot.
+   * @returns {string[]} queued task names
+   */
+  getQueuedTasks() {
+    const inProgress = this.getActiveCount();
+    if (inProgress < this._maxConcurrent) return [];
+
+    const queued = [];
+    for (const task of this.plan.tasks) {
+      const ts = this.taskStatus[task.name];
+      if (!ts) continue;
+      if (ts.status !== TASK_STATES.PENDING && ts.status !== TASK_STATES.SCHEDULED) continue;
+      if (!this._dependenciesMet(task)) continue;
+      queued.push(task.name);
+    }
+    return queued;
   }
 
   // ---- Task State Transitions ----

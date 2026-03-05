@@ -7,8 +7,8 @@ import { computeLayout, NODE_W, NODE_H } from './layout.js';
 const STATE_COLORS = {
   active: '#00ff88', thinking: '#7c5cff', tool_use: '#ff9f1c',
   waiting: '#3a86ff', completed: '#06d6a0', failed: '#ef476f',
-  timed_out: '#ff9800', retrying: '#ffd166', idle: '#404060',
-  human: '#e040fb',
+  timed_out: '#ff9800', retrying: '#ffd166', queued: '#ab47bc',
+  idle: '#404060', human: '#e040fb',
 };
 
 const BG_SURFACE = '#12121e';
@@ -127,7 +127,7 @@ function formatTokens(n) {
   return String(n);
 }
 
-function getNodeState(name, agentStates, taskStatus) {
+function getNodeState(name, agentStates, taskStatus, queuedTasks) {
   const agent = agentStates[name];
   const task = taskStatus[name];
   if (agent && agent.state && agent.state !== 'idle') return agent.state;
@@ -140,6 +140,7 @@ function getNodeState(name, agentStates, taskStatus) {
     if (task.status === 'timed_out') return 'timed_out';
     if (task.status === 'completed_with_errors') return 'completed';
   }
+  if (queuedTasks && queuedTasks.includes(name)) return 'queued';
   return 'idle';
 }
 
@@ -404,7 +405,7 @@ function minimapClickToCamera(canvasW, canvasH, sx, sy, graphBounds, camera) {
 // -- Preact component --
 
 export function CanvasGraph({ taskPlan, taskStatus, agentStates, contextWarnings,
-  logEntries, selectedAgent, onSelectAgent }) {
+  logEntries, selectedAgent, onSelectAgent, queuedTasks }) {
   const canvasRef = useRef(null);
   const stateRef = useRef({
     camera: { x: 0, y: 0, zoom: 1 },
@@ -509,7 +510,7 @@ export function CanvasGraph({ taskPlan, taskStatus, agentStates, contextWarnings
 
       // Draw nodes
       for (const n of cs.nodes) {
-        const state = getNodeState(n.name, agentStates, taskStatus);
+        const state = getNodeState(n.name, agentStates, taskStatus, queuedTasks);
         const tokens = (agentStates[n.name] && agentStates[n.name].tokens) || {};
         const isSelected = selectedAgent === n.name;
         const isHovered = cs.hoveredNode === n.name;
