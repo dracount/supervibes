@@ -834,6 +834,12 @@ function spawnController(goal, terminalCount, model, iteration) {
     state.monitor.on("turnComplete", (tmuxName, durationMs) => {
       broadcast("turnComplete", { name: tmuxName, durationMs });
     });
+    state.monitor.on("conversation", (name, evt) => {
+      broadcast("agentConversation", { agent: name, ...evt });
+    });
+    state.monitor.on("contextWarning", (name, data) => {
+      broadcast("contextWarning", { agent: name, ...data });
+    });
   }
 
   broadcast("status", {
@@ -1438,6 +1444,12 @@ function spawnExecutionPhase(plan, model) {
     state.monitor.on("turnComplete", (tmuxName, durationMs) => {
       broadcast("turnComplete", { name: tmuxName, durationMs });
     });
+    state.monitor.on("conversation", (name, evt) => {
+      broadcast("agentConversation", { agent: name, ...evt });
+    });
+    state.monitor.on("contextWarning", (name, data) => {
+      broadcast("contextWarning", { agent: name, ...data });
+    });
   }
 
   child.on("exit", (code) => {
@@ -1796,6 +1808,15 @@ const server = http.createServer(async (req, res) => {
       taskStatus: state.taskStatus,
       workflowStartedAt: state.workflowStartedAt,
     };
+    // Add conversation buffers for late-joining clients
+    if (state.monitor) {
+      const convos = {};
+      for (const name of state.sessions) {
+        const buf = state.monitor.getConversation(name);
+        if (buf.length > 0) convos[name] = buf;
+      }
+      if (Object.keys(convos).length > 0) initData.agentConversations = convos;
+    }
     res.write(`event: init\ndata: ${JSON.stringify(initData)}\n\n`);
 
     req.on("close", () => {
