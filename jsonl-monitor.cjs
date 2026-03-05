@@ -62,6 +62,8 @@ class JsonlMonitor extends EventEmitter {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
       lastActivity: Date.now(),
       sessionId: null,
+      conversationBuffer: [],  // last 200 conversation events
+      contextWarned: false,
     });
 
     // Start polling if not already
@@ -95,6 +97,16 @@ class JsonlMonitor extends EventEmitter {
   getSessionId(tmuxName) {
     const info = this._sessions.get(tmuxName);
     return info ? info.sessionId : null;
+  }
+
+  /**
+   * Get buffered conversation events for a session (for late-joining clients).
+   * @param {string} tmuxName
+   * @returns {Array}
+   */
+  getConversation(tmuxName) {
+    const info = this._sessions.get(tmuxName);
+    return info ? [...(info.conversationBuffer || [])] : [];
   }
 
   /**
@@ -217,6 +229,41 @@ class JsonlMonitor extends EventEmitter {
         if (usage.output_tokens) info.tokens.output += usage.output_tokens;
         if (usage.cache_read_input_tokens) info.tokens.cacheRead += usage.cache_read_input_tokens;
         if (usage.cache_creation_input_tokens) info.tokens.cacheCreation += usage.cache_creation_input_tokens;
+
+        // Context window warning
+        const totalContext = info.tokens.input + info.tokens.cacheRead;
+        if (totalContext > 150000 && !info.contextWarned) {
+          info.contextWarned = true;
+          this.emit('contextWarning', tmuxName, { totalContext, limit: 200000 });
+        }
+      }
+
+      // Emit conversation events for dashboard
+      if (msg.message && msg.message.content && Array.isArray(msg.message.content)) {
+        for (const block of msg.message.content) {
+          let evt = null;
+          if (block.type === 'thinking') {
+            evt = { type: 'thinking', content: block.thinking, timestamp: Date.now() };
+          } else if (block.type === 'text') {
+            evt = { type: 'text', content: block.text, timestamp: Date.now() };
+          } else if (block.type === 'tool_use') {
+            evt = { type: 'tool_call', toolName: block.name, toolId: block.id, input: block.input, timestamp: Date.now() };
+          } else if (block.type === 'tool_result') {
+            evt = {
+              type: 'tool_result',
+              toolId: block.tool_use_id,
+              content: typeof block.content === 'string'
+                ? block.content.substring(0, 2000)
+                : JSON.stringify(block.content).substring(0, 2000),
+              timestamp: Date.now(),
+            };
+          }
+          if (evt) {
+            info.conversationBuffer.push(evt);
+            if (info.conversationBuffer.length > 200) info.conversationBuffer.shift();
+            this.emit('conversation', tmuxName, evt);
+          }
+        }
       }
 
       if (msg.type === "system" && msg.subtype === "turn_duration") {
