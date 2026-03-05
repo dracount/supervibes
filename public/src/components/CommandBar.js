@@ -30,6 +30,9 @@ export function CommandBar() {
   const taskPlan = useStore(s => s.taskPlan);
   const taskStatus = useStore(s => s.taskStatus);
   const workflowStartedAt = useStore(s => s.workflowStartedAt);
+  const maxConcurrent = useStore(s => s.maxConcurrentAgents);
+  const activeCount = useStore(s => s.activeAgentCount);
+  const queuedTasks = useStore(s => s.queuedTasks);
 
   const [goal, setGoal] = useState('');
   const [termCount, setTermCount] = useState('auto');
@@ -131,6 +134,17 @@ export function CommandBar() {
           <span class="telem-label">Tasks:</span>
           <span class="telem-value">${completedTasks}/${totalTasks}</span>
         </div>
+        ${maxConcurrent != null && html`
+          <div class="telem-item">
+            <span class="telem-label">Agents:</span>
+            <span class="telem-value" style=${{
+              color: activeCount >= maxConcurrent ? '#ffb74d' : '#81c784'
+            }}>${activeCount}/${maxConcurrent}</span>
+            ${queuedTasks.length > 0 && html`
+              <span class="telem-label" style=${{ color: '#ffb74d' }}>(${queuedTasks.length} queued)</span>
+            `}
+          </div>
+        `}
         <div class="progress-bar">
           <div class="progress-fill" style="width:${progressPct}%"></div>
         </div>

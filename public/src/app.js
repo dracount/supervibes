@@ -1,7 +1,7 @@
 import { h, render } from './lib/preact.module.js';
 import { useEffect, useState, useRef, useCallback } from './lib/preact-hooks.module.js';
 import { html } from './lib/html.js';
-import { connectSSE } from './state/sse.js';
+import { connect } from './state/connection.js';
 import { getState, setState, useStore } from './state/store.js';
 import { pauseAgent, resumeAgent } from './state/api.js';
 import { CommandBar } from './components/CommandBar.js';
@@ -11,6 +11,7 @@ import { ActivityFeed } from './components/ActivityFeed.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { HistoryView } from './components/HistoryView.js';
 import { WorkflowSummary } from './components/WorkflowSummary.js';
+import { AnalyticsPanel } from './components/AnalyticsPanel.js';
 
 function useResizeH(initialHeight) {
   const [height, setHeight] = useState(initialHeight);
@@ -48,13 +49,12 @@ function useResizeH(initialHeight) {
 function App() {
   const [feedHeight, onFeedResize, feedDragging] = useResizeH(200);
 
-  // SSE connection with auto-reconnect
+  // WebSocket connection with auto-reconnect
   useEffect(() => {
-    connectSSE();
-    const iv = setInterval(() => {
-      // Reconnect if disconnected
-      connectSSE();
-    }, 30000);
+    connect();
+    // Periodic reconnect check (WebSocket auto-reconnects on close,
+    // but this covers edge cases like tab suspension)
+    const iv = setInterval(() => connect(), 30000);
     return () => clearInterval(iv);
   }, []);
 
@@ -76,10 +76,18 @@ function App() {
         return;
       }
 
+      if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+        e.preventDefault();
+        setState({ showAnalytics: !getState().showAnalytics });
+        return;
+      }
+
       if (e.key === 'Escape') {
         const s = getState();
         if (s.showCommandPalette) {
           setState({ showCommandPalette: false });
+        } else if (s.showAnalytics) {
+          setState({ showAnalytics: false });
         } else if (s.showHistory) {
           setState({ showHistory: false, historySelectedRun: null });
         } else if (s.selectedAgent) {
@@ -125,10 +133,11 @@ function App() {
     </div>
     <div class="resize-handle-h ${feedDragging ? 'active' : ''}" onMouseDown=${onFeedResize}></div>
     <${ActivityFeed} style=${{ height: feedHeight + 'px' }} />
-    <div class="shortcut-hint">\u2318K palette \u00b7 \u2318H history \u00b7 1-9 agents \u00b7 Space pause \u00b7 Esc deselect</div>
+    <div class="shortcut-hint">\u2318K palette \u00b7 \u2318H history \u00b7 \u2318A analytics \u00b7 1-9 agents \u00b7 Space pause \u00b7 Esc deselect</div>
     <${CommandPalette} />
     <${HistoryView} />
     <${WorkflowSummary} />
+    <${AnalyticsPanel} />
   `;
 }
 

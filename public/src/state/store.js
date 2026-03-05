@@ -49,10 +49,19 @@ const state = {
   historyRuns: [],
   historySelectedRun: null,
 
+  // Analytics
+  showAnalytics: false,
+
+  // Concurrency
+  maxConcurrentAgents: null, // null = Infinity (no limit)
+  activeAgentCount: 0,
+  queuedTasks: [],
+
   // UI
   selectedAgent: null,
   feedFilter: 'all', // all, errors, agent:<name>
   showCommandPalette: false,
+  forceCanvasGraph: false,
 };
 
 const listeners = new Set();

@@ -79,6 +79,11 @@ function buildActions() {
     action: () => setState({ showHistory: true, showCommandPalette: false }),
   });
   actions.push({
+    id: 'view:analytics', icon: '\u2261', label: 'View Analytics', shortcut: '\u2318A',
+    category: 'view',
+    action: () => setState({ showAnalytics: true, showCommandPalette: false }),
+  });
+  actions.push({
     id: 'view:deselect', icon: '\u2715', label: 'Deselect agent', shortcut: 'Esc',
     category: 'view',
     action: () => setState({ selectedAgent: null, showCommandPalette: false }),
@@ -92,6 +97,14 @@ function buildActions() {
     id: 'view:filter-errors', icon: '!', label: 'Feed: show errors only', shortcut: '',
     category: 'view',
     action: () => setState({ feedFilter: 'errors', showCommandPalette: false }),
+  });
+  actions.push({
+    id: 'view:canvas-graph',
+    icon: s.forceCanvasGraph ? '\u25a3' : '\u25a2',
+    label: s.forceCanvasGraph ? 'Use SVG Graph (auto)' : 'Use Canvas Graph',
+    shortcut: '',
+    category: 'view',
+    action: () => setState({ forceCanvasGraph: !s.forceCanvasGraph, showCommandPalette: false }),
   });
 
   return actions;

@@ -24,6 +24,8 @@ const { ProjectMemory, extractLearnings, extractIssues, scanFileStructure } = re
 const { HookRunner } = require("./hooks.cjs");
 const { StateManager } = require("./state-manager.cjs");
 const { ConductorExecutor } = require("./conductor.cjs");
+const { WsServer } = require("./ws-server.cjs");
+const { HistoryDB } = require("./database.cjs");
 
 const PORT = 3456;
 
@@ -44,6 +46,12 @@ const TMUX_CONTROL = path.join(__dirname, "tmux-control.cjs");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_BUFFER_LINES = 500;
 const POLL_INTERVAL_MS = 2000;
+
+// --- Terminal backend: node-pty (default) or tmux (fallback) ---
+const useTmuxFallback = !!process.env.TMUX_FALLBACK;
+const tm = useTmuxFallback
+  ? null
+  : new (require("./terminal-manager.cjs").TerminalManager)({ maxBufferLines: MAX_BUFFER_LINES });
 const SESSION_STATE_FILE = path.join(__dirname, ".session-state.json");
 const HISTORY_DIR = path.join(os.homedir(), ".multi-claude", "history");
 
@@ -52,6 +60,17 @@ const SYSTEM_PROMPT = buildSystemPrompt(TMUX_CONTROL);
 // --- State ---
 
 const sm = new StateManager();
+let wsServer = null; // Initialized after HTTP server starts
+
+// --- SQLite History Database ---
+const historyDb = new HistoryDB();
+// Migrate existing JSON history files on first startup
+try {
+  const imported = historyDb.migrateFromJson(HISTORY_DIR);
+  if (imported > 0) console.log(`[DB] Migrated ${imported} history files from JSON to SQLite`);
+} catch (e) {
+  console.error("[DB] JSON migration error:", e.message);
+}
 
 const state = {
   controllerProcess: null,
@@ -84,7 +103,10 @@ function pushControllerLine(line) {
 
 function broadcast(event, data) {
   sm.broadcast(event, data);
+  if (wsServer) wsServer.broadcast(event, data);
 }
+
+// --- tmux CLI wrappers (used only when TMUX_FALLBACK=1) ---
 
 function runTmux(...args) {
   try {
@@ -97,7 +119,6 @@ function runTmux(...args) {
   }
 }
 
-// Safe variant: passes args as array to avoid shell injection
 function runTmuxSafe(...args) {
   try {
     return execFileSync("node", [TMUX_CONTROL, ...args], {
@@ -109,36 +130,114 @@ function runTmuxSafe(...args) {
   }
 }
 
+// --- Unified terminal operations (delegates to node-pty or tmux) ---
+
+function tmStartSession(name, workDir) {
+  if (tm) {
+    tm.startSession(name, workDir);
+    if (state.monitor) state.monitor.registerSession(name, workDir);
+  } else {
+    runTmux(`--start ${name} "${workDir}"`);
+  }
+}
+
+function tmStopSession(name) {
+  if (tm) { tm.stopSession(name); } else { runTmux(`--stop ${name}`); }
+}
+
+function tmStopAll() {
+  if (tm) { tm.stopAll(); } else { runTmux("--stop-all"); }
+}
+
+function tmSendKeys(name, text) {
+  if (tm) {
+    tm.sendKeys(name, text);
+  } else if (text === "") {
+    runTmux(`--cmd ${name} ""`);
+  } else {
+    runTmuxSafe("--cmd", name, text);
+  }
+}
+
+function tmReadOutput(name, lines = 50) {
+  if (tm) { return tm.readOutput(name, lines); }
+  return runTmux(`--read ${name} ${lines}`);
+}
+
+function tmListSessions() {
+  if (tm) { return tm.listSessions(); }
+  const listOutput = runTmux("--list");
+  const sessions = [];
+  if (listOutput && !listOutput.includes("No active sessions")) {
+    for (const line of listOutput.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed && trimmed !== "Active sessions:") sessions.push(trimmed);
+    }
+  }
+  return sessions;
+}
+
+function tmRestoreSession(name, sessionId, workDir) {
+  if (tm) {
+    tm.restoreSession(name, sessionId, workDir);
+    if (state.monitor) state.monitor.registerSession(name, workDir);
+  } else {
+    runTmux(`--restore ${name} ${sessionId} "${workDir}"`);
+  }
+}
+
+function tmSignal(name, sig) {
+  if (tm) { tm.signal(name, sig); } else { runTmux(`--signal ${name} ${sig}`); }
+}
+
+function tmCleanupWorktrees(baseDir) {
+  if (tm) { tm.cleanupWorktrees(baseDir); } else { runTmux(`--cleanup-worktrees "${baseDir}"`); }
+}
+
+// --- Wire node-pty exit events for auto-recovery ---
+
+if (tm) {
+  tm.on("exit", (name, code) => {
+    if (!sm.running || !state.monitor) return;
+    const agentInfo = state.monitor.getAll();
+    const info = agentInfo[name];
+    if (!info || !info.sessionId || info.state === "idle") return;
+
+    const attempts = state.restoreAttempts[name] || 0;
+    if (attempts >= 2) return;
+    state.restoreAttempts[name] = attempts + 1;
+
+    const savedState = loadSessionState();
+    const saved = savedState[name];
+    if (saved && saved.sessionId && saved.workDir) {
+      const restoreMsg = `[Auto-restoring crashed session: ${name} (attempt ${attempts + 1}/2)]`;
+      pushControllerLine(restoreMsg);
+      broadcast("controller", { line: restoreMsg });
+      notify("Multi-Claude", `Auto-restoring crashed agent: ${name}`);
+      try { tmRestoreSession(name, saved.sessionId, saved.workDir); } catch (_) {}
+    }
+  });
+}
+
 function pollTerminals() {
   try {
-    const listOutput = runTmux("--list");
-    const sessions = [];
-    if (listOutput && !listOutput.includes("No active sessions")) {
-      const lines = listOutput.split("\n");
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed && trimmed !== "Active sessions:") {
-          sessions.push(trimmed);
-        }
-      }
-    }
+    const sessions = tmListSessions();
     sm.sessions = sessions;
 
-    // Register new sessions with JSONL monitor
-    if (state.monitor) {
+    // Register new sessions with JSONL monitor (tmux fallback only; node-pty registers in tmStartSession)
+    if (state.monitor && useTmuxFallback) {
       for (const name of sessions) {
         const workDir = getWorkDirForSession(name);
         if (workDir) state.monitor.registerSession(name, workDir);
       }
     }
 
-    // Auto-recovery: detect disappeared sessions that had active JSONL state
-    if (state.monitor && sm.running) {
+    // Auto-recovery for tmux fallback (node-pty uses exit event above)
+    if (useTmuxFallback && state.monitor && sm.running) {
       const savedState = loadSessionState();
       const agentInfo = state.monitor.getAll();
       for (const [name, info] of Object.entries(agentInfo)) {
         if (info.sessionId && info.state !== "idle" && !sessions.includes(name)) {
-          // Cap restore attempts to prevent infinite loops
           const attempts = state.restoreAttempts[name] || 0;
           if (attempts >= 2) continue;
           state.restoreAttempts[name] = attempts + 1;
@@ -149,9 +248,7 @@ function pollTerminals() {
             pushControllerLine(restoreMsg);
             broadcast("controller", { line: restoreMsg });
             notify("Multi-Claude", `Auto-restoring crashed agent: ${name}`);
-            try {
-              runTmux(`--restore ${name} ${saved.sessionId} "${saved.workDir}"`);
-            } catch (_) {}
+            try { tmRestoreSession(name, saved.sessionId, saved.workDir); } catch (_) {}
           }
         }
       }
@@ -165,6 +262,47 @@ function pollTerminals() {
 
 function getTaskStatus() {
   return state.conductor ? state.conductor.getTaskStatus() : {};
+}
+
+function buildInitData() {
+  const initData = Object.assign(sm.toInitData(), {
+    controllerOutput: state.controllerOutput,
+    taskPlan: state.taskPlan,
+    taskStatus: getTaskStatus(),
+  });
+  if (state.monitor) {
+    initData.agentStates = state.monitor.getAll();
+    const convos = {};
+    for (const name of sm.sessions) {
+      const buf = state.monitor.getConversation(name);
+      if (buf.length > 0) convos[name] = buf;
+    }
+    if (Object.keys(convos).length > 0) initData.agentConversations = convos;
+    const warnings = {};
+    for (const [name, info] of state.monitor._sessions) {
+      if (info.contextWarned) {
+        const totalContext = info.tokens.input + info.tokens.cacheRead;
+        warnings[name] = { agent: name, totalContext, limit: 200000 };
+      }
+    }
+    if (Object.keys(warnings).length > 0) initData.contextWarnings = warnings;
+  }
+  if (state.guardrailResults) {
+    initData.guardrailResults = state.guardrailResults;
+  }
+  if (state.conductor) {
+    const fileChanges = state.conductor.getFileChanges();
+    if (fileChanges.length > 0) initData.fileChanges = fileChanges;
+    // Concurrency info
+    const maxC = state.conductor.getMaxConcurrent();
+    initData.maxConcurrentAgents = maxC === Infinity ? null : maxC;
+    initData.activeAgentCount = state.conductor.getActiveCount();
+    initData.queuedTasks = state.conductor.getQueuedTasks();
+  }
+  if (state.workflowSummary) {
+    initData.workflowSummary = state.workflowSummary;
+  }
+  return initData;
 }
 
 // --- Conductor: Failure workflow ---
@@ -205,7 +343,7 @@ function stopConductorTimers() {
 }
 
 /**
- * Retry a single worker task by restarting its tmux session.
+ * Retry a single worker task by restarting its terminal session.
  * The controller is still running — we restart just this worker.
  */
 function retryWorkerTask(task) {
@@ -215,13 +353,13 @@ function retryWorkerTask(task) {
 
   try {
     // Stop old session if it exists
-    try { runTmux(`--stop ${task.name}`); } catch (_) {}
+    try { tmStopSession(task.name); } catch (_) {}
 
     // Get the working directory from controller output
     const workDir = getWorkDirForSession(task.name) || __dirname;
 
     // Start new session
-    runTmux(`--start ${task.name} "${workDir}"`);
+    tmStartSession(task.name, workDir);
 
     // Mark as in_progress via conductor
     state.conductor.markRetryInProgress(task.name);
@@ -229,19 +367,17 @@ function retryWorkerTask(task) {
     // Launch Claude Code in the new session
     const model = sm.model || "sonnet";
     setTimeout(() => {
-      runTmux(`--cmd ${task.name} "claude --dangerously-skip-permissions --model ${model}"`);
+      tmSendKeys(task.name, `claude --dangerously-skip-permissions --model ${model}`);
       setTimeout(() => {
-        runTmux(`--cmd ${task.name} ""`);
+        tmSendKeys(task.name, "");
         setTimeout(() => {
           // Send the worker prompt
           const { buildWorkerPrompt } = require("./task-schema.cjs");
           const memoryContext = state.memory ? state.memory.buildContext() : "";
           const prompt = buildWorkerPrompt(task, state.taskPlan.sharedContext || "", memoryContext);
-          // Escape for shell — replace double quotes with escaped
-          const escaped = prompt.replace(/"/g, '\\"').replace(/\n/g, '\\n');
-          runTmux(`--cmd ${task.name} "${escaped}"`);
+          tmSendKeys(task.name, prompt);
           setTimeout(() => {
-            runTmux(`--cmd ${task.name} ""`);
+            tmSendKeys(task.name, "");
           }, 1000);
         }, 2000);
       }, 1000);
@@ -264,11 +400,18 @@ function retryWorkerTask(task) {
 function createConductor(plan) {
   const conductor = new ConductorExecutor(plan, {
     findProjectDir,
+    maxConcurrentAgents: sm.maxConcurrentAgents,
   });
 
   // Wire conductor events to SSE broadcasting
   conductor.on("statusChanged", (taskStatus) => {
-    broadcast("taskStatus", { taskStatus });
+    const maxC = conductor.getMaxConcurrent();
+    broadcast("taskStatus", {
+      taskStatus,
+      maxConcurrentAgents: maxC === Infinity ? null : maxC,
+      activeAgentCount: conductor.getActiveCount(),
+      queuedTasks: conductor.getQueuedTasks(),
+    });
   });
 
   conductor.on("log", (msg) => {
@@ -279,12 +422,22 @@ function createConductor(plan) {
   conductor.on("taskTimedOut", (taskName) => {
     notify("Multi-Claude", `Task timed out: ${taskName}`);
     // Kill the worker's tmux session
-    try { runTmux(`--stop ${taskName}`); } catch (_) {}
+    try { tmStopSession(taskName); } catch (_) {}
   });
 
   conductor.on("workflowTimeout", () => {
     notify("Multi-Claude", "Workflow timed out!");
     stopController();
+  });
+
+  // Backpressure: when a task completes, check if queued tasks can now start
+  conductor.on("taskCompleted", (taskName) => {
+    const ready = conductor.getReadyTasks();
+    if (ready.length > 0) {
+      const msg = `[CONCURRENCY] Slot freed by "${taskName}" — ${ready.length} task(s) eligible: ${ready.join(", ")}`;
+      pushControllerLine(msg);
+      broadcast("controller", { line: msg });
+    }
   });
 
   conductor.on("retryReady", (taskName, task) => {
@@ -664,7 +817,7 @@ function spawnController(goal, terminalCount, model, iteration) {
     stopPolling();
 
     // Cleanup tmux sessions
-    try { runTmux("--stop-all"); } catch (_) {}
+    try { tmStopAll(); } catch (_) {}
     sm.sessions = [];
     broadcast("terminals", { sessions: [] });
 
@@ -744,7 +897,7 @@ function spawnReviewController(goal, model) {
     stopPolling();
 
     // Cleanup tmux sessions
-    try { runTmux("--stop-all"); } catch (_) {}
+    try { tmStopAll(); } catch (_) {}
     sm.sessions = [];
     broadcast("terminals", { sessions: [] });
 
@@ -844,12 +997,8 @@ function computeTotalTokens() {
 
 function saveRunHistory(outcome) {
   try {
-    fs.mkdirSync(HISTORY_DIR, { recursive: true });
-
     const now = Date.now();
     const isoTimestamp = new Date(now).toISOString();
-
-    // Build goal slug: first 50 chars, lowercased, non-alphanumeric → dash, strip leading/trailing dashes
     const goalSlug = (sm.goal || "unknown")
       .substring(0, 50)
       .toLowerCase()
@@ -873,47 +1022,11 @@ function saveRunHistory(outcome) {
         error: s.error ? String(s.error).substring(0, 500) : null,
       })),
       totalTokens: computeTotalTokens(),
-      estimatedCost: null, // reserved for future cost calculation
+      estimatedCost: null,
       summary: state.conductor ? state.conductor.getSummary(sm.workflowStartedAt) : null,
     };
 
-    // Generate filename
-    const isoDate = isoTimestamp.replace(/[:.]/g, "-");
-    const filename = `${isoDate}-${goalSlug}.json`;
-    const filepath = path.join(HISTORY_DIR, filename);
-
-    fs.writeFileSync(filepath, JSON.stringify(record, null, 2));
-
-    // Enforce limits: max 100 files, max 50MB total
-    const files = fs.readdirSync(HISTORY_DIR)
-      .filter(f => f.endsWith(".json"))
-      .sort(); // oldest first by name (ISO date prefix)
-
-    // Delete oldest if > 100 files
-    while (files.length > 100) {
-      const oldest = files.shift();
-      try { fs.unlinkSync(path.join(HISTORY_DIR, oldest)); } catch (_) {}
-    }
-
-    // Delete oldest if total size > 50MB
-    const MAX_TOTAL_SIZE = 50 * 1024 * 1024;
-    let totalSize = 0;
-    const fileSizes = files.map(f => {
-      try {
-        const size = fs.statSync(path.join(HISTORY_DIR, f)).size;
-        totalSize += size;
-        return { name: f, size };
-      } catch (_) {
-        return { name: f, size: 0 };
-      }
-    });
-
-    let idx = 0;
-    while (totalSize > MAX_TOTAL_SIZE && idx < fileSizes.length - 1) {
-      try { fs.unlinkSync(path.join(HISTORY_DIR, fileSizes[idx].name)); } catch (_) {}
-      totalSize -= fileSizes[idx].size;
-      idx++;
-    }
+    historyDb.saveRun(record);
   } catch (_) {
     // History saving should never crash the server
   }
@@ -973,7 +1086,7 @@ function finishRun(reason) {
         });
       } catch (_) {}
     }
-    try { runTmux(`--cleanup-worktrees "${projectDir}"`); } catch (_) {}
+    try { tmCleanupWorktrees(projectDir); } catch (_) {}
   }
 
   // Fire hooks
@@ -1018,11 +1131,11 @@ function stopController() {
       }
     }, 3000);
   }
-  try { runTmux("--stop-all"); } catch (_) {}
+  try { tmStopAll(); } catch (_) {}
   // Clean up worktrees
   const projectDir = findProjectDir();
   if (projectDir) {
-    try { runTmux(`--cleanup-worktrees "${projectDir}"`); } catch (_) {}
+    try { tmCleanupWorktrees(projectDir); } catch (_) {}
   }
   // Stop JSONL monitor
   if (state.monitor) {
@@ -1307,7 +1420,7 @@ function spawnExecutionPhase(plan, model) {
     stopPolling();
     stopConductorTimers();
 
-    try { runTmux("--stop-all"); } catch (_) {}
+    try { tmStopAll(); } catch (_) {}
     sm.sessions = [];
     broadcast("terminals", { sessions: [] });
 
@@ -1427,12 +1540,16 @@ const server = http.createServer(async (req, res) => {
     const iterations = Math.min(Math.max(parseInt(body.iterations) || 0, 0), 5);
 
     const structured = body.structured !== false; // default true
+    const maxConcurrentAgents = body.maxConcurrentAgents
+      ? Math.max(1, parseInt(body.maxConcurrentAgents, 10))
+      : undefined;
 
     sm.iterations = iterations;
     sm.currentIteration = 0;
     sm.stopped = false;
     sm.reviewDone = false;
     sm.postChecks = null;
+    sm.maxConcurrentAgents = maxConcurrentAgents; // Store for conductor creation
     state.guardrailResults = null;
     state.restoreAttempts = {};
     state.taskPlan = null;
@@ -1498,7 +1615,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 400, { error: "Invalid session ID in saved state" });
     }
     try {
-      runTmux(`--restore ${name} ${info.sessionId} "${info.workDir}"`);
+      tmRestoreSession(name, info.sessionId, info.workDir);
       notify("Multi-Claude", `Restored agent: ${name}`);
       return sendJson(res, 200, { ok: true, sessionId: info.sessionId });
     } catch (e) {
@@ -1541,50 +1658,30 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { agents });
   }
 
-  // --- History endpoints ---
+  // --- History endpoints (SQLite-backed) ---
   if (pathname === "/api/history" && req.method === "GET") {
     try {
-      if (!fs.existsSync(HISTORY_DIR)) return sendJson(res, 200, []);
       const limit = parseInt(url.searchParams.get("limit") || "20", 10);
-      const files = fs.readdirSync(HISTORY_DIR)
-        .filter(f => f.endsWith(".json"))
-        .sort()
-        .reverse()
-        .slice(0, limit);
-      const runs = files.map(f => {
-        try {
-          const data = JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8"));
-          const cost = data.estimatedCost || null;
-          return { id: data.id, goal: data.goal, model: data.model, outcome: data.outcome,
-            duration: data.duration, taskCount: data.tasks ? data.tasks.length : 0,
-            estimatedCost: cost, totalCost: cost, startedAt: data.startedAt };
-        } catch (_) { return null; }
-      }).filter(Boolean);
+      const offset = parseInt(url.searchParams.get("offset") || "0", 10);
+      const runs = historyDb.getRuns(limit, offset);
       return sendJson(res, 200, runs);
     } catch (e) { console.error("History list error:", e.message); return sendJson(res, 200, []); }
   }
 
-  const historyMatch = pathname.match(/^\/api\/history\/(.+)$/);
-
-  // Helper: derive filename from id (id uses : and . while filename uses -)
-  function findHistoryFile(id) {
-    const expectedFilename = id.replace(/[:.]/g, "-") + ".json";
-    const expectedPath = path.join(HISTORY_DIR, expectedFilename);
-    if (fs.existsSync(expectedPath)) return expectedFilename;
-    // Fallback: scan files if naming convention doesn't match
-    const files = fs.readdirSync(HISTORY_DIR).filter(f => f.endsWith(".json"));
-    return files.find(f => {
-      try { return JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8")).id === id; }
-      catch (_) { return false; }
-    }) || null;
+  if (pathname === "/api/analytics" && req.method === "GET") {
+    try {
+      const analytics = historyDb.getAnalytics();
+      return sendJson(res, 200, analytics);
+    } catch (e) { console.error("Analytics error:", e.message); return sendJson(res, 500, { error: "Analytics query failed" }); }
   }
+
+  const historyMatch = pathname.match(/^\/api\/history\/(.+)$/);
 
   if (historyMatch && req.method === "GET") {
     const id = decodeURIComponent(historyMatch[1]);
     try {
-      const file = findHistoryFile(id);
-      if (!file) return sendJson(res, 404, { error: "Run not found" });
-      const data = JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, file), "utf-8"));
+      const data = historyDb.getRun(id);
+      if (!data) return sendJson(res, 404, { error: "Run not found" });
       return sendJson(res, 200, data);
     } catch (e) { console.error("History GET error:", e.message); return sendJson(res, 500, { error: "Failed to read history" }); }
   }
@@ -1592,9 +1689,8 @@ const server = http.createServer(async (req, res) => {
   if (historyMatch && req.method === "DELETE") {
     const id = decodeURIComponent(historyMatch[1]);
     try {
-      const file = findHistoryFile(id);
-      if (!file) return sendJson(res, 404, { error: "Run not found" });
-      fs.unlinkSync(path.join(HISTORY_DIR, file));
+      const deleted = historyDb.deleteRun(id);
+      if (!deleted) return sendJson(res, 404, { error: "Run not found" });
       return sendJson(res, 200, { ok: true });
     } catch (e) { console.error("History DELETE error:", e.message); return sendJson(res, 500, { error: "Failed to delete" }); }
   }
@@ -1627,7 +1723,7 @@ const server = http.createServer(async (req, res) => {
 
     if (action === 'pause' && req.method === 'POST') {
       try {
-        runTmux(`--signal ${agentName} SIGSTOP`);
+        tmSignal(agentName, "SIGSTOP");
         broadcast('intervention', { agent: agentName, action: 'pause', timestamp: Date.now(), detail: 'Agent paused' });
         return sendJson(res, 200, { ok: true });
       } catch (e) {
@@ -1637,7 +1733,7 @@ const server = http.createServer(async (req, res) => {
 
     if (action === 'resume' && req.method === 'POST') {
       try {
-        runTmux(`--signal ${agentName} SIGCONT`);
+        tmSignal(agentName, "SIGCONT");
         broadcast('intervention', { agent: agentName, action: 'resume', timestamp: Date.now(), detail: 'Agent resumed' });
         return sendJson(res, 200, { ok: true });
       } catch (e) {
@@ -1650,8 +1746,8 @@ const server = http.createServer(async (req, res) => {
       const prompt = (body.prompt || '').trim();
       if (!prompt) return sendJson(res, 400, { error: 'Prompt is required' });
       try {
-        runTmuxSafe('--cmd', agentName, prompt);
-        setTimeout(() => { try { runTmuxSafe('--cmd', agentName, ''); } catch (_) {} }, 1000);
+        tmSendKeys(agentName, prompt);
+        setTimeout(() => { try { tmSendKeys(agentName, ""); } catch (_) {} }, 1000);
         broadcast('intervention', { agent: agentName, action: 'inject', timestamp: Date.now(), detail: prompt.substring(0, 100) });
         return sendJson(res, 200, { ok: true });
       } catch (e) {
@@ -1662,7 +1758,7 @@ const server = http.createServer(async (req, res) => {
     if (action === 'kill' && req.method === 'POST') {
       const body = await parseBody(req);
       try {
-        runTmux(`--stop ${agentName}`);
+        tmStopSession(agentName);
         broadcast('intervention', { agent: agentName, action: 'kill', timestamp: Date.now(), detail: body.restart ? 'Killed + restarting' : 'Killed' });
         return sendJson(res, 200, { ok: true });
       } catch (e) {
@@ -1675,8 +1771,8 @@ const server = http.createServer(async (req, res) => {
       broadcast('intervention', { agent: agentName, action: 'approve', timestamp: Date.now(), detail: body.response || 'Approved' });
       if (body.response) {
         try {
-          runTmuxSafe('--cmd', agentName, body.response);
-          setTimeout(() => { try { runTmuxSafe('--cmd', agentName, ''); } catch (_) {} }, 1000);
+          tmSendKeys(agentName, body.response);
+          setTimeout(() => { try { tmSendKeys(agentName, ""); } catch (_) {} }, 1000);
         } catch (_) {}
       }
       return sendJson(res, 200, { ok: true });
@@ -1685,7 +1781,7 @@ const server = http.createServer(async (req, res) => {
     if (action === 'tail' && req.method === 'GET') {
       const lines = parseInt(url.searchParams.get('lines') || '50');
       try {
-        const output = runTmux(`--read ${agentName} ${Math.min(lines, 200)}`);
+        const output = tmReadOutput(agentName, Math.min(lines, 200));
         return sendJson(res, 200, { lines: output.split('\n') });
       } catch (e) {
         return sendJson(res, 200, { lines: [] });
@@ -1699,7 +1795,7 @@ const server = http.createServer(async (req, res) => {
       try { state.controllerProcess.kill('SIGKILL'); } catch (_) {}
       state.controllerProcess = null;
     }
-    try { runTmux('--stop-all'); } catch (_) {}
+    try { tmStopAll(); } catch (_) {}
     if (state.monitor) { state.monitor.stop(); state.monitor = null; }
     stopConductorTimers();
     clearSessionState();
@@ -1712,61 +1808,6 @@ const server = http.createServer(async (req, res) => {
     broadcast('intervention', { agent: '*', action: 'estop', timestamp: Date.now(), detail: 'Emergency stop — all agents killed' });
     notify('HiveMind', 'EMERGENCY STOP — all agents killed');
     return sendJson(res, 200, { ok: true });
-  }
-
-  if (pathname === "/api/stream" && req.method === "GET") {
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    });
-
-    sm.addClient(res);
-
-    // Send init event with current state
-    const initData = Object.assign(sm.toInitData(), {
-      controllerOutput: state.controllerOutput,
-      taskPlan: state.taskPlan,
-      taskStatus: getTaskStatus(),
-    });
-    // Add agent states and conversation buffers for late-joining clients
-    if (state.monitor) {
-      initData.agentStates = state.monitor.getAll();
-      const convos = {};
-      for (const name of sm.sessions) {
-        const buf = state.monitor.getConversation(name);
-        if (buf.length > 0) convos[name] = buf;
-      }
-      if (Object.keys(convos).length > 0) initData.agentConversations = convos;
-      // Include context warnings for late-joining clients
-      const warnings = {};
-      for (const [name, info] of state.monitor._sessions) {
-        if (info.contextWarned) {
-          const totalContext = info.tokens.input + info.tokens.cacheRead;
-          warnings[name] = { agent: name, totalContext, limit: 200000 };
-        }
-      }
-      if (Object.keys(warnings).length > 0) initData.contextWarnings = warnings;
-    }
-    if (state.guardrailResults) {
-      initData.guardrailResults = state.guardrailResults;
-    }
-    if (state.conductor) {
-      const fileChanges = state.conductor.getFileChanges();
-      if (fileChanges.length > 0) initData.fileChanges = fileChanges;
-    }
-    if (state.guardrailResults) {
-      initData.guardrailResults = state.guardrailResults;
-    }
-    if (state.workflowSummary) {
-      initData.workflowSummary = state.workflowSummary;
-    }
-    res.write(`event: init\ndata: ${JSON.stringify(initData)}\n\n`);
-
-    req.on("close", () => {
-      sm.removeClient(res);
-    });
-    return;
   }
 
   // --- Static Files ---
@@ -1796,4 +1837,68 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Dashboard: http://localhost:${PORT}`);
+});
+
+// --- WebSocket server ---
+
+wsServer = new WsServer(server);
+
+wsServer.on("clientConnected", (ws) => {
+  wsServer.sendTo(ws, "init", buildInitData());
+});
+
+wsServer.on("clientMessage", (ws, msg) => {
+  const { action, agent, prompt, restart, response } = msg;
+  if (!action || !agent) return;
+
+  try {
+    switch (action) {
+      case "pause":
+        tmSignal(agent, "SIGSTOP");
+        broadcast("intervention", { agent, action: "pause", timestamp: Date.now(), detail: "Agent paused" });
+        wsServer.sendTo(ws, "actionResult", { ok: true, action, agent });
+        break;
+
+      case "resume":
+        tmSignal(agent, "SIGCONT");
+        broadcast("intervention", { agent, action: "resume", timestamp: Date.now(), detail: "Agent resumed" });
+        wsServer.sendTo(ws, "actionResult", { ok: true, action, agent });
+        break;
+
+      case "inject": {
+        const text = (prompt || "").trim();
+        if (!text) {
+          wsServer.sendTo(ws, "actionResult", { ok: false, action, agent, error: "Prompt is required" });
+          return;
+        }
+        tmSendKeys(agent, text);
+        setTimeout(() => { try { tmSendKeys(agent, ""); } catch (_) {} }, 1000);
+        broadcast("intervention", { agent, action: "inject", timestamp: Date.now(), detail: text.substring(0, 100) });
+        wsServer.sendTo(ws, "actionResult", { ok: true, action, agent });
+        break;
+      }
+
+      case "kill":
+        tmStopSession(agent);
+        broadcast("intervention", { agent, action: "kill", timestamp: Date.now(), detail: restart ? "Killed + restarting" : "Killed" });
+        wsServer.sendTo(ws, "actionResult", { ok: true, action, agent });
+        break;
+
+      case "approve":
+        broadcast("intervention", { agent, action: "approve", timestamp: Date.now(), detail: response || "Approved" });
+        if (response) {
+          try {
+            tmSendKeys(agent, response);
+            setTimeout(() => { try { tmSendKeys(agent, ""); } catch (_) {} }, 1000);
+          } catch (_) {}
+        }
+        wsServer.sendTo(ws, "actionResult", { ok: true, action, agent });
+        break;
+
+      default:
+        wsServer.sendTo(ws, "actionResult", { ok: false, action, agent, error: "Unknown action" });
+    }
+  } catch (e) {
+    wsServer.sendTo(ws, "actionResult", { ok: false, action, agent, error: e.message || String(e) });
+  }
 });

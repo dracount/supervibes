@@ -1,9 +1,12 @@
 import { h } from '../lib/preact.module.js';
-import { useRef, useEffect, useState } from '../lib/preact-hooks.module.js';
+import { useRef, useEffect, useState, useCallback } from '../lib/preact-hooks.module.js';
 import { html } from '../lib/html.js';
 import { useStore, setState } from '../state/store.js';
 import { computeLayout, NODE_W, NODE_H } from '../graph/layout.js';
 import { edgePath } from '../graph/edges.js';
+import { CanvasGraph } from '../graph/CanvasGraph.js';
+
+const CANVAS_THRESHOLD = 20;
 
 function formatTokens(n) {
   if (!n) return '0';
@@ -11,7 +14,7 @@ function formatTokens(n) {
   return String(n);
 }
 
-function getNodeState(name, agentStates, taskStatus) {
+function getNodeState(name, agentStates, taskStatus, queuedTasks) {
   const agent = agentStates[name];
   const task = taskStatus[name];
   if (agent && agent.state && agent.state !== 'idle') return agent.state;
@@ -24,6 +27,8 @@ function getNodeState(name, agentStates, taskStatus) {
     if (task.status === 'timed_out') return 'timed_out';
     if (task.status === 'completed_with_errors') return 'completed';
   }
+  // Check if task is queued (ready but waiting for concurrency slot)
+  if (queuedTasks && queuedTasks.includes(name)) return 'queued';
   return 'idle';
 }
 
@@ -32,7 +37,7 @@ function stateColor(state) {
     active: 'var(--state-active)', thinking: 'var(--state-thinking)',
     tool_use: 'var(--state-tool-use)', waiting: 'var(--state-waiting)',
     completed: 'var(--state-completed)', failed: 'var(--state-failed)',
-    timed_out: '#ff9800',
+    timed_out: '#ff9800', queued: '#ab47bc',
     retrying: 'var(--state-retrying)', idle: 'var(--state-idle)',
     human: 'var(--state-human)',
   };
@@ -51,6 +56,8 @@ export function TopologyGraph() {
   const contextWarnings = useStore(s => s.contextWarnings);
   const logEntries = useStore(s => s.logEntries);
   const selectedAgent = useStore(s => s.selectedAgent);
+  const forceCanvas = useStore(s => s.forceCanvasGraph);
+  const queuedTasks = useStore(s => s.queuedTasks);
   const containerRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 500 });
 
@@ -64,13 +71,35 @@ export function TopologyGraph() {
     return () => ro.disconnect();
   }, []);
 
+  const handleSelectAgent = useCallback((name) => {
+    setState({ selectedAgent: name });
+  }, []);
+
   if (!taskPlan || !taskPlan.tasks || taskPlan.tasks.length === 0) {
     return html`<div class="topology-graph" ref=${containerRef}>
       <div class="graph-empty">Waiting for execution plan...</div>
     </div>`;
   }
 
-  // Build set of agent names that received interventions
+  // Switch to Canvas renderer for large graphs or when forced
+  const useCanvas = forceCanvas || taskPlan.tasks.length > CANVAS_THRESHOLD;
+
+  if (useCanvas) {
+    return html`<div class="topology-graph" ref=${containerRef}>
+      <${CanvasGraph}
+        taskPlan=${taskPlan}
+        taskStatus=${taskStatus}
+        agentStates=${agentStates}
+        contextWarnings=${contextWarnings}
+        logEntries=${logEntries}
+        selectedAgent=${selectedAgent}
+        onSelectAgent=${handleSelectAgent}
+        queuedTasks=${queuedTasks}
+      />
+    </div>`;
+  }
+
+  // SVG renderer for small graphs
   const interventionAgents = new Set();
   if (logEntries) {
     for (const entry of logEntries) {
@@ -112,7 +141,7 @@ export function TopologyGraph() {
 
         <!-- Nodes -->
         ${nodes.map(n => {
-          const state = getNodeState(n.name, agentStates, taskStatus);
+          const state = getNodeState(n.name, agentStates, taskStatus, queuedTasks);
           const tokens = agentStates[n.name]?.tokens || {};
           const totalTok = (tokens.input || 0) + (tokens.output || 0);
           const isSelected = selectedAgent === n.name;
