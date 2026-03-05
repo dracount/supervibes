@@ -1,0 +1,20 @@
+{
+  "name": "multi-claude",
+  "version": "0.4.0",
+  "description": "HiveMind — Multi-Claude parallel orchestration system with web dashboard",
+  "main": "server.cjs",
+  "scripts": {
+    "start": "node server.cjs",
+    "start:tmux": "TMUX_FALLBACK=1 node server.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
+    "ws": "^8.18.0"
+  },
+  "os": ["linux", "darwin", "win32"],
+  "license": "MIT"
+}
