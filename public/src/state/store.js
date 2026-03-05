@@ -15,8 +15,6 @@ const state = {
   // Agents
   sessions: [],
   agentStates: {},      // name -> { state, tokens }
-  agentSessionIds: {},   // name -> sessionId
-
   // Plan & Tasks
   taskPlan: null,
   taskStatus: {},

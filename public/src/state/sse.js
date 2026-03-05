@@ -145,14 +145,12 @@ export function connectSSE() {
       taskPlan: d.taskPlan || null,
       taskStatus: d.taskStatus || {},
       postChecks: d.postChecks || null,
+      guardrailResults: d.guardrailResults || null,
       workflowStartedAt: d.workflowStartedAt || null,
+      agentStates: d.agentStates || {},
+      agentConversations: d.agentConversations || {},
+      contextWarnings: d.contextWarnings || {},
     });
-    if (d.agentConversations) {
-      setState({ agentConversations: d.agentConversations });
-    }
-    if (d.contextWarnings) {
-      setState({ contextWarnings: d.contextWarnings });
-    }
   });
 
   eventSource.addEventListener('controller', (e) => {
@@ -167,11 +165,23 @@ export function connectSSE() {
 
   eventSource.addEventListener('status', (e) => {
     const d = JSON.parse(e.data);
+    const prev = getState();
     const update = { running: d.running, phase: d.phase };
     if (d.currentIteration !== undefined) update.currentIteration = d.currentIteration;
     if (d.iterations !== undefined) update.iterations = d.iterations;
     if (d.postChecks) update.postChecks = d.postChecks;
     if (d.workflowStartedAt) update.workflowStartedAt = d.workflowStartedAt;
+    // Clear stale state when a new workflow starts
+    if (d.running && !prev.running) {
+      update.agentStates = {};
+      update.agentConversations = {};
+      update.contextWarnings = {};
+      update.postChecks = null;
+      update.guardrailResults = null;
+      update.taskStatus = {};
+      update.logEntries = [];
+      update.controllerLines = [];
+    }
     if (!d.running) { update.sessions = []; update.workflowStartedAt = null; }
     setState(update);
   });
@@ -191,13 +201,6 @@ export function connectSSE() {
     const agentStates = { ...getState().agentStates };
     agentStates[d.name] = { state: d.state, tokens: d.tokens };
     setState({ agentStates });
-  });
-
-  eventSource.addEventListener('sessionMapped', (e) => {
-    const d = JSON.parse(e.data);
-    const agentSessionIds = { ...getState().agentSessionIds };
-    agentSessionIds[d.name] = d.sessionId;
-    setState({ agentSessionIds });
   });
 
   eventSource.addEventListener('agentConversation', (e) => {

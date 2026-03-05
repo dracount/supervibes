@@ -71,6 +71,7 @@ const state = {
   taskStatus: {},          // name → { status, validation, attempts, startedAt, ... }
   memory: null,            // ProjectMemory instance
   hooks: null,             // HookRunner instance
+  guardrailResults: null,  // last guardrail results map (for late-joining SSE clients)
   // --- Conductor-inspired features ---
   workflowTimeoutTimer: null,   // setTimeout handle for workflow-level timeout
   taskTimeoutInterval: null,    // setInterval handle for per-task timeout checks
@@ -399,7 +400,7 @@ function startWaitConditionPolling() {
         conditionMet = fs.existsSync(filePath);
       } else if (ts.waitCondition.type === WAIT_CONDITION_TYPES.HTTP_READY) {
         try {
-          execSync(`curl -sf -o /dev/null --max-time 3 "${ts.waitCondition.target}"`, {
+          execFileSync("curl", ["-sf", "-o", "/dev/null", "--max-time", "3", ts.waitCondition.target], {
             timeout: 5000, stdio: "pipe"
           });
           conditionMet = true;
@@ -817,9 +818,6 @@ function ensureMonitor() {
   });
   state.monitor.on("stateChange", (tmuxName, agentState, tokens) => {
     broadcast("agentState", { name: tmuxName, state: agentState, tokens });
-  });
-  state.monitor.on("turnComplete", (tmuxName, durationMs) => {
-    broadcast("turnComplete", { name: tmuxName, durationMs });
   });
   state.monitor.on("conversation", (name, evt) => {
     broadcast("agentConversation", { agent: name, ...evt });
@@ -1263,6 +1261,7 @@ function runGuardrails(projectDir, plan) {
     }
   }
 
+  state.guardrailResults = results;
   broadcast("guardrails", { results });
   broadcast("taskStatus", { taskStatus: state.taskStatus });
 
@@ -1570,6 +1569,7 @@ const server = http.createServer(async (req, res) => {
     state.stopped = false;
     state.reviewDone = false;
     state.postChecks = null;
+    state.guardrailResults = null;
     state.restoreAttempts = {};
     state.taskPlan = null;
     state.taskStatus = {};
@@ -1792,8 +1792,9 @@ const server = http.createServer(async (req, res) => {
       taskStatus: state.taskStatus,
       workflowStartedAt: state.workflowStartedAt,
     };
-    // Add conversation buffers for late-joining clients
+    // Add agent states and conversation buffers for late-joining clients
     if (state.monitor) {
+      initData.agentStates = state.monitor.getAll();
       const convos = {};
       for (const name of state.sessions) {
         const buf = state.monitor.getConversation(name);
@@ -1809,6 +1810,9 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (Object.keys(warnings).length > 0) initData.contextWarnings = warnings;
+    }
+    if (state.guardrailResults) {
+      initData.guardrailResults = state.guardrailResults;
     }
     res.write(`event: init\ndata: ${JSON.stringify(initData)}\n\n`);
 

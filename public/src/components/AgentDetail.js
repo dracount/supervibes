@@ -30,6 +30,7 @@ export function AgentDetail() {
   const agentStates = useStore(s => s.agentStates);
   const running = useStore(s => s.running);
   const logEntries = useStore(s => s.logEntries);
+  const guardrailResults = useStore(s => s.guardrailResults);
 
   const [showInject, setShowInject] = useState(false);
   const [injectText, setInjectText] = useState('');
@@ -67,6 +68,9 @@ export function AgentDetail() {
   const agent = agentStates[selectedAgent] || {};
   const agentState = agent.state || status.status || 'idle';
   const tokens = agent.tokens || {};
+
+  // Per-agent guardrail results
+  const agentGuardrails = guardrailResults && guardrailResults[selectedAgent];
 
   // Prompts sent to this agent
   const prompts = logEntries
@@ -149,6 +153,32 @@ export function AgentDetail() {
             <div>Cache R: ${(tokens.cacheRead || 0).toLocaleString()} | W: ${(tokens.cacheCreation || 0).toLocaleString()}</div>
           </div>
         </div>
+
+        ${agentGuardrails && html`
+          <div class="agent-section">
+            <div class="agent-section-title">Guardrail Results</div>
+            <div class="agent-section-body">
+              ${(agentGuardrails.files || []).map(f => html`
+                <div class="agent-output-check ${f.pass ? 'pass' : 'fail'}"
+                  style="color:${f.pass ? 'var(--state-completed)' : 'var(--state-failed)'}">
+                  ${f.pass ? '\u2713' : '\u2717'} ${f.file}
+                </div>
+              `)}
+              ${(agentGuardrails.exports || []).map(e => html`
+                <div class="agent-output-check ${e.found ? 'pass' : 'fail'}"
+                  style="color:${e.found ? 'var(--state-completed)' : 'var(--state-failed)'}">
+                  ${e.found ? '\u2713' : '\u2717'} export: ${e.export}
+                </div>
+              `)}
+              ${(agentGuardrails.patterns || []).map(p => html`
+                <div class="agent-output-check ${p.matched ? 'pass' : 'fail'}"
+                  style="color:${p.matched ? 'var(--state-completed)' : 'var(--state-failed)'}">
+                  ${p.matched ? '\u2713' : '\u2717'} pattern: ${p.pattern}
+                </div>
+              `)}
+            </div>
+          </div>
+        `}
 
         ${status.error && html`
           <div class="agent-section">
