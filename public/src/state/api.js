@@ -1,3 +1,5 @@
+import { sendCommand } from './connection.js';
+
 export async function startBuild({ goal, terminalCount, model, iterations, structured }) {
   const res = await fetch('/api/start', {
     method: 'POST',
@@ -16,16 +18,19 @@ export async function emergencyStop() {
 }
 
 export async function pauseAgent(name) {
+  if (sendCommand('pause', name)) return { ok: true };
   const res = await fetch(`/api/agent/${encodeURIComponent(name)}/pause`, { method: 'POST' });
   return res.json();
 }
 
 export async function resumeAgent(name) {
+  if (sendCommand('resume', name)) return { ok: true };
   const res = await fetch(`/api/agent/${encodeURIComponent(name)}/resume`, { method: 'POST' });
   return res.json();
 }
 
 export async function injectPrompt(name, prompt) {
+  if (sendCommand('inject', name, { prompt })) return { ok: true };
   const res = await fetch(`/api/agent/${encodeURIComponent(name)}/inject`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -35,6 +40,7 @@ export async function injectPrompt(name, prompt) {
 }
 
 export async function killAgent(name, restart = false) {
+  if (sendCommand('kill', name, { restart })) return { ok: true };
   const res = await fetch(`/api/agent/${encodeURIComponent(name)}/kill`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -44,6 +50,7 @@ export async function killAgent(name, restart = false) {
 }
 
 export async function approveGate(name, response = '') {
+  if (sendCommand('approve', name, { response })) return { ok: true };
   const res = await fetch(`/api/agent/${encodeURIComponent(name)}/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -74,5 +81,13 @@ export async function getHistoryRun(id) {
 export async function deleteHistoryRun(id) {
   const res = await fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`History delete failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Analytics API ---
+
+export async function getAnalytics() {
+  const res = await fetch('/api/analytics');
+  if (!res.ok) throw new Error(`Analytics failed: ${res.status}`);
   return res.json();
 }
