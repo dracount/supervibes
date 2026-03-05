@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from '../lib/preact-hooks.module.js';
 import { html } from '../lib/html.js';
 import { useStore } from '../state/store.js';
 import { pauseAgent, resumeAgent, injectPrompt, killAgent, getAgentTail } from '../state/api.js';
+import ConversationView from './ConversationView.js';
 
 function stateColor(state) {
   const map = {
@@ -36,6 +37,7 @@ export function AgentDetail() {
   const [injectText, setInjectText] = useState('');
   const [tailLines, setTailLines] = useState([]);
   const tailRef = useRef(null);
+  const [activeTab, setActiveTab] = useState('conversation');
 
   // Fetch tail periodically when agent selected and running
   useEffect(() => {
@@ -84,8 +86,21 @@ export function AgentDetail() {
     setShowInject(false);
   }
 
+  const tabStyle = (tabName) => ({
+    padding: '8px 16px',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: activeTab === tabName ? '600' : '400',
+    color: activeTab === tabName ? '#e0e0e0' : '#777',
+    borderBottom: activeTab === tabName ? '2px solid #4fc3f7' : '2px solid transparent',
+    userSelect: 'none',
+    transition: 'color 0.15s, border-color 0.15s',
+    whiteSpace: 'nowrap',
+  });
+
   return html`
-    <div class="agent-detail">
+    <div class="agent-detail" style="display:flex;flex-direction:column;height:100%;">
+      <!-- Always visible: header -->
       <div class="agent-header">
         <div class="agent-header-name">
           <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${stateColor(agentState)}"></span>
@@ -101,58 +116,13 @@ export function AgentDetail() {
         </div>
       </div>
 
-      <div class="agent-sections">
-        ${task.description && html`
-          <div class="agent-section">
-            <div class="agent-section-title">Task</div>
-            <div class="agent-section-body">${task.description}</div>
-          </div>
-        `}
-
-        ${task.ownedFiles && task.ownedFiles.length > 0 && html`
-          <div class="agent-section">
-            <div class="agent-section-title">Owned Files</div>
-            <div class="agent-file-list">
-              ${task.ownedFiles.map(f => html`<div>${f}</div>`)}
-            </div>
-          </div>
-        `}
-
-        ${task.expectedOutput && html`
-          <div class="agent-section">
-            <div class="agent-section-title">Expected Output</div>
-            <div class="agent-section-body">
-              ${(task.expectedOutput.files || []).map(f => html`
-                <div class="agent-output-check pending">\u25cb ${f}</div>
-              `)}
-              ${(task.expectedOutput.exports || []).map(e => html`
-                <div class="agent-output-check pending">\u25cb export: ${e}</div>
-              `)}
-            </div>
-          </div>
-        `}
-
-        ${prompts.length > 0 && html`
-          <div class="agent-section">
-            <div class="agent-section-title">Prompts Sent (${prompts.length})</div>
-            <div class="agent-section-body">
-              ${prompts.map((p, i) => html`
-                <div style="margin-bottom:4px;">
-                  <span style="color:var(--state-waiting);font-size:10px;">#${i + 1}</span>
-                  <pre>${p}</pre>
-                </div>
-              `)}
-            </div>
-          </div>
-        `}
-
-        <div class="agent-section">
-          <div class="agent-section-title">Telemetry</div>
-          <div class="agent-section-body" style="font-family:var(--font-mono);">
-            <div>In: ${(tokens.input || 0).toLocaleString()} | Out: ${(tokens.output || 0).toLocaleString()}</div>
-            <div>Cache R: ${(tokens.cacheRead || 0).toLocaleString()} | W: ${(tokens.cacheCreation || 0).toLocaleString()}</div>
-          </div>
+      <!-- Always visible: task description -->
+      ${task.description && html`
+        <div class="agent-section" style="flex-shrink:0;padding:8px 12px;border-bottom:1px solid #333;">
+          <div class="agent-section-title">Task</div>
+          <div class="agent-section-body">${task.description}</div>
         </div>
+      `}
 
         ${agentGuardrails && html`
           <div class="agent-section">
@@ -180,24 +150,18 @@ export function AgentDetail() {
           </div>
         `}
 
-        ${status.error && html`
-          <div class="agent-section">
-            <div class="agent-section-title" style="color:var(--state-failed);">Error</div>
-            <div class="agent-section-body" style="color:var(--state-failed);font-style:italic;">
-              ${status.error}
-            </div>
-          </div>
-        `}
-      </div>
-
-      ${tailLines.length > 0 && html`
-        <div class="agent-tail" ref=${tailRef}>
-          ${tailLines.join('\n')}
+      <!-- Always visible: action buttons -->
+      ${running && html`
+        <div class="agent-actions" style="flex-shrink:0;padding:6px 12px;border-bottom:1px solid #333;">
+          <button class="btn" onClick=${() => pauseAgent(selectedAgent)}>Pause</button>
+          <button class="btn" onClick=${() => resumeAgent(selectedAgent)}>Resume</button>
+          <button class="btn" onClick=${() => setShowInject(!showInject)}>Inject</button>
+          <button class="btn btn-danger" onClick=${() => killAgent(selectedAgent, true)}>Restart</button>
         </div>
       `}
 
       ${showInject && html`
-        <div class="inject-bar">
+        <div class="inject-bar" style="flex-shrink:0;">
           <input placeholder="Inject prompt..." value=${injectText}
             onInput=${e => setInjectText(e.target.value)}
             onKeyDown=${e => e.key === 'Enter' && handleInject()}
@@ -207,14 +171,125 @@ export function AgentDetail() {
         </div>
       `}
 
-      ${running && html`
-        <div class="agent-actions">
-          <button class="btn" onClick=${() => pauseAgent(selectedAgent)}>Pause</button>
-          <button class="btn" onClick=${() => resumeAgent(selectedAgent)}>Resume</button>
-          <button class="btn" onClick=${() => setShowInject(!showInject)}>Inject</button>
-          <button class="btn btn-danger" onClick=${() => killAgent(selectedAgent, true)}>Restart</button>
-        </div>
-      `}
+      <!-- Tab bar -->
+      <div style=${{
+        display: 'flex',
+        flexDirection: 'row',
+        borderBottom: '1px solid #333',
+        flexShrink: 0,
+        background: '#1e1e2e',
+      }}>
+        <div style=${tabStyle('conversation')} onClick=${() => setActiveTab('conversation')}>Conversation</div>
+        <div style=${tabStyle('files')} onClick=${() => setActiveTab('files')}>Files</div>
+        <div style=${tabStyle('telemetry')} onClick=${() => setActiveTab('telemetry')}>Telemetry</div>
+      </div>
+
+      <!-- Tab content -->
+      <div style=${{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+
+        ${activeTab === 'conversation' && html`
+          <div style=${{ height: '100%' }}>
+            <${ConversationView} agentName=${selectedAgent} />
+            ${tailLines.length > 0 && html`
+              <div class="agent-tail" ref=${tailRef}>
+                ${tailLines.join('\n')}
+              </div>
+            `}
+          </div>
+        `}
+
+        ${activeTab === 'files' && html`
+          <div class="agent-sections" style="padding:8px 0;">
+            ${task.ownedFiles && task.ownedFiles.length > 0 ? html`
+              <div class="agent-section">
+                <div class="agent-section-title">Owned Files</div>
+                <div class="agent-file-list">
+                  ${task.ownedFiles.map(f => html`<div>${f}</div>`)}
+                </div>
+              </div>
+            ` : html`
+              <div style=${{ padding: '16px', color: '#666', fontSize: '13px', fontStyle: 'italic' }}>
+                No owned files defined
+              </div>
+            `}
+
+            ${task.expectedOutput ? html`
+              <div class="agent-section">
+                <div class="agent-section-title">Expected Output</div>
+                <div class="agent-section-body">
+                  ${(task.expectedOutput.files || []).map(f => html`
+                    <div class="agent-output-check pending">\u25cb ${f}</div>
+                  `)}
+                  ${(task.expectedOutput.exports || []).map(e => html`
+                    <div class="agent-output-check pending">\u25cb export: ${e}</div>
+                  `)}
+                </div>
+              </div>
+            ` : html`
+              <div style=${{ padding: '16px', color: '#666', fontSize: '13px', fontStyle: 'italic' }}>
+                No expected outputs defined
+              </div>
+            `}
+          </div>
+        `}
+
+        ${activeTab === 'telemetry' && html`
+          <div class="agent-sections" style="padding:8px 0;">
+            <div class="agent-section">
+              <div class="agent-section-title">Token Usage</div>
+              <div class="agent-section-body" style="font-family:var(--font-mono);">
+                <div>In: ${(tokens.input || 0).toLocaleString()} | Out: ${(tokens.output || 0).toLocaleString()}</div>
+                <div>Cache R: ${(tokens.cacheRead || 0).toLocaleString()} | W: ${(tokens.cacheCreation || 0).toLocaleString()}</div>
+              </div>
+            </div>
+
+            <div class="agent-section">
+              <div class="agent-section-title">Context Usage</div>
+              <div class="agent-section-body" style="font-family:var(--font-mono);">
+                <div>Input tokens: ${(tokens.input || 0).toLocaleString()}</div>
+                <div>Cache read: ${(tokens.cacheRead || 0).toLocaleString()}</div>
+                <div style=${{ color: '#666', fontSize: '11px', marginTop: '4px', fontStyle: 'italic' }}>
+                  Context meter coming soon
+                </div>
+              </div>
+            </div>
+
+            <div class="agent-section">
+              <div class="agent-section-title">Retry History</div>
+              <div class="agent-section-body" style="font-family:var(--font-mono);">
+                <div>Attempts: ${status.attempts || 0}${status.maxAttempts ? ' / ' + status.maxAttempts : ''}</div>
+                ${status.retryPolicy && html`<div>Policy: ${status.retryPolicy}</div>`}
+                <div style=${{ color: '#666', fontSize: '11px', marginTop: '4px', fontStyle: 'italic' }}>
+                  Detailed retry timeline coming soon
+                </div>
+              </div>
+            </div>
+
+            ${prompts.length > 0 && html`
+              <div class="agent-section">
+                <div class="agent-section-title">Prompts Sent (${prompts.length})</div>
+                <div class="agent-section-body">
+                  ${prompts.map((p, i) => html`
+                    <div style="margin-bottom:4px;">
+                      <span style="color:var(--state-waiting);font-size:10px;">#${i + 1}</span>
+                      <pre>${p}</pre>
+                    </div>
+                  `)}
+                </div>
+              </div>
+            `}
+
+            ${status.error && html`
+              <div class="agent-section">
+                <div class="agent-section-title" style="color:var(--state-failed);">Error</div>
+                <div class="agent-section-body" style="color:var(--state-failed);font-style:italic;">
+                  ${status.error}
+                </div>
+              </div>
+            `}
+          </div>
+        `}
+      </div>
     </div>
   `;
 }
