@@ -37,6 +37,17 @@ const state = {
   // Context warnings
   contextWarnings: {},  // name → { totalContext, limit }
 
+  // File changes
+  fileChanges: [],  // [{path, type, agent, task, timestamp}]
+
+  // Workflow summary
+  workflowSummary: null,
+
+  // History
+  showHistory: false,
+  historyRuns: [],
+  historySelectedRun: null,
+
   // UI
   selectedAgent: null,
   feedFilter: 'all', // all, errors, agent:<name>

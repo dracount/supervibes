@@ -28,6 +28,7 @@ const {
  *   - 'waitConditionTimedOut' (taskName, taskStatus)
  *   - 'workflowTimeout'   ()
  *   - 'retryReady'        (taskName, task, taskStatus)
+ *   - 'fileChange'         (changeRecord) — file change detected in watched directory
  *   - 'log'               (message)  — informational messages for controller output
  */
 class ConductorExecutor extends EventEmitter {
@@ -49,6 +50,11 @@ class ConductorExecutor extends EventEmitter {
     };
     this._stopped = false;
     this._findProjectDir = options.findProjectDir || (() => null);
+
+    // File change tracking
+    this._watchers = new Map();       // taskName -> fs.FSWatcher
+    this._fileChanges = [];           // capped at 500
+    this._debounceTimers = new Map(); // taskName -> { timer, pending[] }
   }
 
   // ---- Initialization ----
@@ -104,6 +110,7 @@ class ConductorExecutor extends EventEmitter {
   stop() {
     this._stopped = true;
     this._clearAllTimers();
+    this._closeAllWatchers();
     this.retryQueue = [];
   }
 
@@ -356,6 +363,134 @@ class ConductorExecutor extends EventEmitter {
       const ts = this.taskStatus[name];
       return `- ${name}: ${ts.status} (${ts.error || "unknown error"}, attempts: ${ts.attempts}/${ts.maxAttempts})`;
     }).join("\n");
+  }
+
+  // ---- File Change Tracking ----
+
+  /** Directories to ignore when tracking file changes */
+  static IGNORED_DIRS = new Set([
+    'node_modules', '.git', '.next', 'dist', 'build', '.cache',
+    '__pycache__', '.tsbuildinfo', 'coverage', '.nyc_output',
+  ]);
+
+  static MAX_FILE_CHANGES = 500;
+  static MAX_WATCHERS = 50;
+  static DEBOUNCE_MS = 200;
+
+  /**
+   * Start watching a task's working directory for file changes.
+   * @param {string} taskName - Name of the task/agent
+   * @param {string} workDir - Absolute path to the directory to watch
+   */
+  watchTask(taskName, workDir) {
+    // Don't exceed watcher cap
+    if (this._watchers.size >= ConductorExecutor.MAX_WATCHERS) {
+      this.emit("log", `[FILE WATCH] Max watchers (${ConductorExecutor.MAX_WATCHERS}) reached — skipping "${taskName}"`);
+      return;
+    }
+
+    // Don't double-watch
+    if (this._watchers.has(taskName)) return;
+
+    try {
+      if (!fs.existsSync(workDir)) {
+        this.emit("log", `[FILE WATCH] Directory not found for "${taskName}": ${workDir} — skipping`);
+        return;
+      }
+
+      const watcher = fs.watch(workDir, { recursive: true }, (eventType, filename) => {
+        if (!filename) return;
+
+        // Filter out noisy directories
+        const parts = filename.split(path.sep);
+        for (const part of parts) {
+          if (ConductorExecutor.IGNORED_DIRS.has(part)) return;
+        }
+
+        // Also ignore common noisy file patterns
+        if (filename.endsWith('.swp') || filename.endsWith('.swo') || filename.endsWith('~')) return;
+
+        // Debounce: collect changes over DEBOUNCE_MS then emit batch
+        let debounce = this._debounceTimers.get(taskName);
+        if (!debounce) {
+          debounce = { timer: null, pending: [] };
+          this._debounceTimers.set(taskName, debounce);
+        }
+
+        debounce.pending.push(filename);
+
+        if (debounce.timer) clearTimeout(debounce.timer);
+        debounce.timer = setTimeout(() => {
+          const filenames = [...new Set(debounce.pending)]; // deduplicate
+          debounce.pending = [];
+
+          for (const fname of filenames) {
+            const changeRecord = {
+              path: fname,
+              type: 'modified',
+              agent: taskName,
+              timestamp: Date.now(),
+            };
+
+            this._fileChanges.push(changeRecord);
+            // Cap at MAX_FILE_CHANGES
+            while (this._fileChanges.length > ConductorExecutor.MAX_FILE_CHANGES) {
+              this._fileChanges.shift();
+            }
+
+            this.emit("fileChange", changeRecord);
+          }
+        }, ConductorExecutor.DEBOUNCE_MS);
+      });
+
+      watcher.on("error", (err) => {
+        this.emit("log", `[FILE WATCH] Error watching "${taskName}": ${err.message}`);
+        this.unwatchTask(taskName);
+      });
+
+      this._watchers.set(taskName, watcher);
+    } catch (err) {
+      // ENOENT or other filesystem errors — skip gracefully
+      if (err.code !== 'ENOENT') {
+        this.emit("log", `[FILE WATCH] Failed to watch "${taskName}": ${err.message}`);
+      }
+    }
+  }
+
+  /**
+   * Stop watching a task's directory.
+   * @param {string} taskName
+   */
+  unwatchTask(taskName) {
+    const watcher = this._watchers.get(taskName);
+    if (watcher) {
+      try { watcher.close(); } catch (_) {}
+      this._watchers.delete(taskName);
+    }
+
+    const debounce = this._debounceTimers.get(taskName);
+    if (debounce) {
+      if (debounce.timer) clearTimeout(debounce.timer);
+      this._debounceTimers.delete(taskName);
+    }
+  }
+
+  /**
+   * Get a copy of all recorded file changes.
+   * @returns {Array} copy of file change records
+   */
+  getFileChanges() {
+    return this._fileChanges.slice();
+  }
+
+  /**
+   * Close all file watchers (called from stop()).
+   * @private
+   */
+  _closeAllWatchers() {
+    for (const taskName of [...this._watchers.keys()]) {
+      this.unwatchTask(taskName);
+    }
   }
 
   // ---- Internal: Timeout Monitoring ----

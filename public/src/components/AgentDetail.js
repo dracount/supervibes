@@ -4,6 +4,7 @@ import { html } from '../lib/html.js';
 import { useStore } from '../state/store.js';
 import { pauseAgent, resumeAgent, injectPrompt, killAgent, getAgentTail } from '../state/api.js';
 import ConversationView from './ConversationView.js';
+import FileChanges from './FileChanges.js';
 
 function stateColor(state) {
   const map = {
@@ -332,6 +333,11 @@ export function AgentDetail() {
                 No expected outputs defined
               </div>
             `}
+
+            <div class="agent-section">
+              <div class="agent-section-title">File Changes</div>
+              <${FileChanges} agentName=${selectedAgent} />
+            </div>
           </div>
         `}
 

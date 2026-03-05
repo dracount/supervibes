@@ -151,6 +151,14 @@ export function connectSSE() {
       agentConversations: d.agentConversations || {},
       contextWarnings: d.contextWarnings || {},
     });
+    if (d.agentConversations) {
+      setState({ agentConversations: d.agentConversations });
+    }
+    if (d.contextWarnings) {
+      setState({ contextWarnings: d.contextWarnings });
+    }
+    if (d.fileChanges) setState({ fileChanges: d.fileChanges });
+    if (d.workflowSummary) setState({ workflowSummary: d.workflowSummary });
   });
 
   eventSource.addEventListener('controller', (e) => {
@@ -217,6 +225,18 @@ export function connectSSE() {
     const d = JSON.parse(e.data);
     const warnings = { ...getState().contextWarnings, [d.agent]: d };
     setState({ contextWarnings: warnings });
+  });
+
+  eventSource.addEventListener('fileChange', (e) => {
+    const d = JSON.parse(e.data);
+    const changes = [...getState().fileChanges, d];
+    if (changes.length > 500) changes.splice(0, changes.length - 500);
+    setState({ fileChanges: changes });
+  });
+
+  eventSource.addEventListener('workflowSummary', (e) => {
+    const d = JSON.parse(e.data);
+    setState({ workflowSummary: d });
   });
 
   eventSource.addEventListener('guardrails', (e) => {

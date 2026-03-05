@@ -3,6 +3,7 @@
 
 const http = require("http");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { execSync, execFileSync, spawn } = require("child_process");
 const {
@@ -44,6 +45,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const MAX_BUFFER_LINES = 500;
 const POLL_INTERVAL_MS = 2000;
 const SESSION_STATE_FILE = path.join(__dirname, ".session-state.json");
+const HISTORY_DIR = path.join(os.homedir(), ".multi-claude", "history");
 
 const SYSTEM_PROMPT = buildSystemPrompt(TMUX_CONTROL);
 
@@ -286,6 +288,10 @@ function createConductor(plan) {
 
   conductor.on("retryReady", (taskName, task) => {
     retryWorkerTask(task);
+  });
+
+  conductor.on("fileChange", (change) => {
+    broadcast("fileChange", change);
   });
 
   return conductor;
@@ -821,6 +827,96 @@ function generateWorkflowSummary() {
   return state.conductor.getSummary(sm.workflowStartedAt).summaryText;
 }
 
+// --- Run history persistence ---
+
+function computeTotalTokens() {
+  if (!state.monitor) return { input: 0, output: 0 };
+  const all = state.monitor.getAll();
+  let input = 0, output = 0;
+  for (const info of Object.values(all)) {
+    input += info.tokens.input || 0;
+    output += info.tokens.output || 0;
+  }
+  return { input, output };
+}
+
+function saveRunHistory(outcome) {
+  try {
+    fs.mkdirSync(HISTORY_DIR, { recursive: true });
+
+    const now = Date.now();
+    const isoTimestamp = new Date(now).toISOString();
+
+    // Build goal slug: first 50 chars, lowercased, non-alphanumeric → dash, strip leading/trailing dashes
+    const goalSlug = (sm.goal || "unknown")
+      .substring(0, 50)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+
+    const record = {
+      id: `${isoTimestamp}-${goalSlug}`,
+      goal: sm.goal,
+      model: sm.model,
+      terminalCount: sm.terminalCount,
+      outcome: outcome,
+      startedAt: sm.workflowStartedAt,
+      endedAt: now,
+      duration: sm.workflowStartedAt ? now - sm.workflowStartedAt : null,
+      tasks: Object.entries(getTaskStatus()).map(([name, s]) => ({
+        name,
+        status: s.status,
+        duration: s.completedAt && s.startedAt ? s.completedAt - s.startedAt : null,
+        attempts: s.attempts || 1,
+        error: s.error ? String(s.error).substring(0, 500) : null,
+      })),
+      totalTokens: computeTotalTokens(),
+      estimatedCost: null, // reserved for future cost calculation
+      summary: state.conductor ? state.conductor.getSummary(sm.workflowStartedAt) : null,
+    };
+
+    // Generate filename
+    const isoDate = isoTimestamp.replace(/[:.]/g, "-");
+    const filename = `${isoDate}-${goalSlug}.json`;
+    const filepath = path.join(HISTORY_DIR, filename);
+
+    fs.writeFileSync(filepath, JSON.stringify(record, null, 2));
+
+    // Enforce limits: max 100 files, max 50MB total
+    const files = fs.readdirSync(HISTORY_DIR)
+      .filter(f => f.endsWith(".json"))
+      .sort(); // oldest first by name (ISO date prefix)
+
+    // Delete oldest if > 100 files
+    while (files.length > 100) {
+      const oldest = files.shift();
+      try { fs.unlinkSync(path.join(HISTORY_DIR, oldest)); } catch (_) {}
+    }
+
+    // Delete oldest if total size > 50MB
+    const MAX_TOTAL_SIZE = 50 * 1024 * 1024;
+    let totalSize = 0;
+    const fileSizes = files.map(f => {
+      try {
+        const size = fs.statSync(path.join(HISTORY_DIR, f)).size;
+        totalSize += size;
+        return { name: f, size };
+      } catch (_) {
+        return { name: f, size: 0 };
+      }
+    });
+
+    let idx = 0;
+    while (totalSize > MAX_TOTAL_SIZE && idx < fileSizes.length - 1) {
+      try { fs.unlinkSync(path.join(HISTORY_DIR, fileSizes[idx].name)); } catch (_) {}
+      totalSize -= fileSizes[idx].size;
+      idx++;
+    }
+  } catch (_) {
+    // History saving should never crash the server
+  }
+}
+
 function finishRun(reason) {
   sm.running = false;
   sm.phase = "idle";
@@ -868,6 +964,9 @@ function finishRun(reason) {
       postChecks: sm.postChecks,
     });
   }
+  // Persist run history (before monitor is stopped so token data is available)
+  saveRunHistory(reason || "completed");
+
   // Stop JSONL monitor
   if (state.monitor) {
     state.monitor.stop();
@@ -1419,6 +1518,57 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 200, { agents });
   }
 
+  // --- History endpoints ---
+  if (pathname === "/api/history" && req.method === "GET") {
+    try {
+      if (!fs.existsSync(HISTORY_DIR)) return sendJson(res, 200, []);
+      const limit = parseInt(url.searchParams.get("limit") || "20", 10);
+      const files = fs.readdirSync(HISTORY_DIR)
+        .filter(f => f.endsWith(".json"))
+        .sort()
+        .reverse()
+        .slice(0, limit);
+      const runs = files.map(f => {
+        try {
+          const data = JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8"));
+          return { id: data.id, goal: data.goal, model: data.model, outcome: data.outcome,
+            duration: data.duration, taskCount: data.tasks ? data.tasks.length : 0,
+            estimatedCost: data.estimatedCost || null, startedAt: data.startedAt };
+        } catch (_) { return null; }
+      }).filter(Boolean);
+      return sendJson(res, 200, runs);
+    } catch (_) { return sendJson(res, 200, []); }
+  }
+
+  const historyMatch = pathname.match(/^\/api\/history\/(.+)$/);
+  if (historyMatch && req.method === "GET") {
+    const id = decodeURIComponent(historyMatch[1]);
+    try {
+      const files = fs.readdirSync(HISTORY_DIR).filter(f => f.endsWith(".json"));
+      const file = files.find(f => {
+        try { return JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8")).id === id; }
+        catch (_) { return false; }
+      });
+      if (!file) return sendJson(res, 404, { error: "Run not found" });
+      const data = JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, file), "utf-8"));
+      return sendJson(res, 200, data);
+    } catch (_) { return sendJson(res, 500, { error: "Failed to read history" }); }
+  }
+
+  if (historyMatch && req.method === "DELETE") {
+    const id = decodeURIComponent(historyMatch[1]);
+    try {
+      const files = fs.readdirSync(HISTORY_DIR).filter(f => f.endsWith(".json"));
+      const file = files.find(f => {
+        try { return JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8")).id === id; }
+        catch (_) { return false; }
+      });
+      if (!file) return sendJson(res, 404, { error: "Run not found" });
+      fs.unlinkSync(path.join(HISTORY_DIR, file));
+      return sendJson(res, 200, { ok: true });
+    } catch (_) { return sendJson(res, 500, { error: "Failed to delete" }); }
+  }
+
   if (pathname === "/api/memory" && req.method === "GET") {
     const memData = state.memory ? state.memory.getData() : null;
     return sendJson(res, 200, { memory: memData });
@@ -1570,6 +1720,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (state.guardrailResults) {
       initData.guardrailResults = state.guardrailResults;
+    }
+    if (state.conductor) {
+      const fileChanges = state.conductor.getFileChanges();
+      if (fileChanges.length > 0) initData.fileChanges = fileChanges;
     }
     res.write(`event: init\ndata: ${JSON.stringify(initData)}\n\n`);
 

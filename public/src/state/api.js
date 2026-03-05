@@ -56,3 +56,23 @@ export async function getAgentTail(name, lines = 50) {
   const res = await fetch(`/api/agent/${encodeURIComponent(name)}/tail?lines=${lines}`);
   return res.json();
 }
+
+// --- History API ---
+
+export async function getHistoryList(limit = 20) {
+  const res = await fetch(`/api/history?limit=${limit}`);
+  if (!res.ok) throw new Error(`History list failed: ${res.status}`);
+  return res.json();
+}
+
+export async function getHistoryRun(id) {
+  const res = await fetch(`/api/history/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`History run failed: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteHistoryRun(id) {
+  const res = await fetch(`/api/history/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`History delete failed: ${res.status}`);
+  return res.json();
+}
