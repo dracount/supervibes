@@ -21,7 +21,7 @@ function getNodeState(name, agentStates, taskStatus) {
     if (task.status === 'failed') return 'failed';
     if (task.status === 'retrying') return 'retrying';
     if (task.status === 'waiting') return 'waiting';
-    if (task.status === 'timed_out') return 'failed';
+    if (task.status === 'timed_out') return 'timed_out';
     if (task.status === 'completed_with_errors') return 'completed';
   }
   return 'idle';
@@ -32,6 +32,7 @@ function stateColor(state) {
     active: 'var(--state-active)', thinking: 'var(--state-thinking)',
     tool_use: 'var(--state-tool-use)', waiting: 'var(--state-waiting)',
     completed: 'var(--state-completed)', failed: 'var(--state-failed)',
+    timed_out: '#ff9800',
     retrying: 'var(--state-retrying)', idle: 'var(--state-idle)',
     human: 'var(--state-human)',
   };
@@ -47,6 +48,7 @@ export function TopologyGraph() {
   const taskPlan = useStore(s => s.taskPlan);
   const taskStatus = useStore(s => s.taskStatus);
   const agentStates = useStore(s => s.agentStates);
+  const contextWarnings = useStore(s => s.contextWarnings);
   const selectedAgent = useStore(s => s.selectedAgent);
   const containerRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 500 });
@@ -76,6 +78,9 @@ export function TopologyGraph() {
   return html`
     <div class="topology-graph" ref=${containerRef}>
       <svg viewBox="0 0 ${size.w} ${size.h}" xmlns="http://www.w3.org/2000/svg">
+        <style>
+          @keyframes ctxPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        </style>
         <!-- Phase labels -->
         ${phases.map((phase, pi) => {
           const firstNode = nodes.find(n => n.phase === pi);
@@ -109,6 +114,10 @@ export function TopologyGraph() {
               <!-- State dot -->
               <circle class="node-state-dot" cx=${n.x + 14} cy=${n.y + 16} r="4"
                 fill=${stateColor(state)} />
+              ${state === 'timed_out' && html`
+                <text x=${n.x + n.w - 12} y=${n.y + 16} text-anchor="end"
+                  style="font-size:9px;font-weight:700;fill:#ff9800;font-family:var(--font-mono);">T/O</text>
+              `}
               <!-- Name -->
               <text class="node-name" x=${n.x + 24} y=${n.y + 20}>${n.name}</text>
               <!-- Role -->
@@ -120,12 +129,29 @@ export function TopologyGraph() {
                 fill="var(--bg-void)" />
               <!-- Progress bar fill (based on state) -->
               <rect x=${n.x + 10} y=${n.y + 48}
-                width=${(n.w - 20) * (state === 'completed' ? 1 : state === 'active' ? 0.5 : 0)}
+                width=${(n.w - 20) * (state === 'completed' ? 1 : state === 'active' ? 0.5 : state === 'failed' || state === 'timed_out' ? 1 : 0)}
                 height="4" rx="2" fill=${stateColor(state)} />
               <!-- Telemetry -->
               <text class="node-telem" x=${n.x + 10} y=${n.y + 72}>
                 ${formatTokens(totalTok)} tok
               </text>
+              <!-- Context usage bar -->
+              ${(() => {
+                const ctxIn = tokens.input || 0;
+                const ctxCache = tokens.cacheRead || 0;
+                if (ctxIn === 0 && ctxCache === 0) return null;
+                const ctxPct = Math.min(100, Math.round(((ctxIn + ctxCache) / 200000) * 100));
+                const ctxColor = ctxPct > 75 ? '#f44336' : ctxPct >= 50 ? '#ff9800' : '#4caf50';
+                const hasWarning = !!contextWarnings[n.name];
+                return html`
+                  <rect x=${n.x + 10} y=${n.y + n.h - 8} width=${n.w - 20} height="4" rx="2"
+                    fill="#333" />
+                  <rect x=${n.x + 10} y=${n.y + n.h - 8}
+                    width=${(n.w - 20) * (ctxPct / 100)}
+                    height="4" rx="2" fill=${ctxColor}
+                    style=${hasWarning ? 'animation: ctxPulse 1s ease-in-out infinite' : ''} />
+                `;
+              })()}
             </g>
           `;
         })}

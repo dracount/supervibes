@@ -57,6 +57,11 @@
   to { stroke-dashoffset: -10; }
 }
 
+@keyframes ctxPulseDetail {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 .phase-label {
   fill: var(--text-muted);
   font-family: var(--font-mono);

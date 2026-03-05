@@ -28,9 +28,17 @@ export function ActivityFeed({ style }) {
   // Filter entries
   let filtered = logEntries;
   if (feedFilter === 'errors') {
-    filtered = logEntries.filter(e =>
-      e.type === 'stop' || e.type === 'exit' || e.type === 'intervention' || e.type === 'human'
-    );
+    const errorTextPattern = /timeout|timed_out|guardrail|violation/i;
+    filtered = logEntries.filter(e => {
+      // Original error types
+      if (e.type === 'stop' || e.type === 'exit' || e.type === 'intervention' || e.type === 'human') return true;
+      // Postcheck failures
+      if (e.type === 'postcheck' && e.msg && /fail/i.test(e.msg)) return true;
+      // Text-based matches for timeout, guardrail, violation keywords
+      if (e.msg && errorTextPattern.test(e.msg)) return true;
+      if (e.detail && typeof e.detail === 'string' && errorTextPattern.test(e.detail)) return true;
+      return false;
+    });
   } else if (feedFilter.startsWith('agent:')) {
     const agentName = feedFilter.substring(6);
     filtered = logEntries.filter(e => e.agent === agentName);
