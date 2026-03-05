@@ -150,15 +150,9 @@ export function connectSSE() {
       agentStates: d.agentStates || {},
       agentConversations: d.agentConversations || {},
       contextWarnings: d.contextWarnings || {},
+      fileChanges: d.fileChanges || [],
+      workflowSummary: d.workflowSummary || null,
     });
-    if (d.agentConversations) {
-      setState({ agentConversations: d.agentConversations });
-    }
-    if (d.contextWarnings) {
-      setState({ contextWarnings: d.contextWarnings });
-    }
-    if (d.fileChanges) setState({ fileChanges: d.fileChanges });
-    if (d.workflowSummary) setState({ workflowSummary: d.workflowSummary });
   });
 
   eventSource.addEventListener('controller', (e) => {
@@ -189,6 +183,8 @@ export function connectSSE() {
       update.taskStatus = {};
       update.logEntries = [];
       update.controllerLines = [];
+      update.fileChanges = [];
+      update.workflowSummary = null;
     }
     if (!d.running) { update.sessions = []; update.workflowStartedAt = null; }
     setState(update);

@@ -42,6 +42,7 @@ const state = {
 
   // Workflow summary
   workflowSummary: null,
+  showWorkflowSummaryRequested: false,
 
   // History
   showHistory: false,

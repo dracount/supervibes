@@ -67,8 +67,7 @@ function buildActions() {
       id: 'view:summary', icon: '\u2611', label: 'View last workflow summary', shortcut: '',
       category: 'view',
       action: () => {
-        setState({ showCommandPalette: false });
-        if (window.__showWorkflowSummary) window.__showWorkflowSummary();
+        setState({ showCommandPalette: false, showWorkflowSummaryRequested: true });
       },
     });
   }

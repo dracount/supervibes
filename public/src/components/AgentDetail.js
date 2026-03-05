@@ -45,6 +45,13 @@ export function AgentDetail() {
   const [expandPostChecks, setExpandPostChecks] = useState(false);
   const [expandGuardrails, setExpandGuardrails] = useState(false);
 
+  // Reset tab when agent changes
+  useEffect(() => {
+    setActiveTab('conversation');
+    setExpandPostChecks(false);
+    setExpandGuardrails(false);
+  }, [selectedAgent]);
+
   // Fetch tail periodically when agent selected and running
   useEffect(() => {
     if (!selectedAgent || !running) { setTailLines([]); return; }
@@ -228,27 +235,37 @@ export function AgentDetail() {
             </div>
           `}
 
-          <!-- Guardrail violations (collapsible) -->
-          ${guardrailResults && guardrailResults.length > 0 && html`
-            <div style=${{ marginTop: '6px' }}>
-              <div style=${{
-                cursor: 'pointer', userSelect: 'none', fontSize: '12px',
-                color: '#aaa', display: 'flex', alignItems: 'center', gap: '4px',
-              }} onClick=${() => setExpandGuardrails(!expandGuardrails)}>
-                <span style=${{ fontSize: '10px', display: 'inline-block', transform: expandGuardrails ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>${'\u25B6'}</span>
-                Guardrail Violations (${guardrailResults.length})
-              </div>
-              ${expandGuardrails && html`
-                <div style=${{ marginTop: '4px', paddingLeft: '14px' }}>
-                  ${guardrailResults.map(v => html`
-                    <div style=${{ fontSize: '12px', marginBottom: '3px', color: '#ef9a9a' }}>
-                      ${v.rule || v.message || v.description || JSON.stringify(v)}
-                    </div>
-                  `)}
+          <!-- Guardrail violations (collapsible, per-agent) -->
+          ${(() => {
+            const agentGR = guardrailResults && guardrailResults[selectedAgent];
+            if (!agentGR) return null;
+            const failures = [
+              ...(agentGR.files || []).filter(f => !f.pass).map(f => `missing: ${f.file}`),
+              ...(agentGR.exports || []).filter(e => !e.found).map(e => `export not found: ${e.export}`),
+              ...(agentGR.patterns || []).filter(p => !p.matched).map(p => `pattern not matched: ${p.pattern}`),
+            ];
+            if (failures.length === 0) return null;
+            return html`
+              <div style=${{ marginTop: '6px' }}>
+                <div style=${{
+                  cursor: 'pointer', userSelect: 'none', fontSize: '12px',
+                  color: '#aaa', display: 'flex', alignItems: 'center', gap: '4px',
+                }} onClick=${() => setExpandGuardrails(!expandGuardrails)}>
+                  <span style=${{ fontSize: '10px', display: 'inline-block', transform: expandGuardrails ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>${'\u25B6'}</span>
+                  Guardrail Violations (${failures.length})
                 </div>
-              `}
-            </div>
-          `}
+                ${expandGuardrails && html`
+                  <div style=${{ marginTop: '4px', paddingLeft: '14px' }}>
+                    ${failures.map(f => html`
+                      <div style=${{ fontSize: '12px', marginBottom: '3px', color: '#ef9a9a' }}>
+                        ${f}
+                      </div>
+                    `)}
+                  </div>
+                `}
+              </div>
+            `;
+          })()}
 
           <!-- Last events before failure -->
           ${agentConversations && agentConversations[selectedAgent] && agentConversations[selectedAgent].length > 0 && html`

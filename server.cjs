@@ -638,6 +638,7 @@ function spawnController(goal, terminalCount, model, iteration) {
   state.controllerOutput = [];
   sm.sessions = [];
   sm.phase = iteration === 0 ? "build" : "iteration";
+  state.workflowSummary = null;
 
   // Create JSONL monitor
   ensureMonitor();
@@ -1178,6 +1179,7 @@ function spawnPlanningPhase(goal, terminalCount, model) {
   state.taskPlan = null;
   state.conductor = null;
   state.workflowSummary = null;
+  state.guardrailResults = null;
 
   broadcast("status", { running: true, phase: "planning", goal, terminalCount });
 
@@ -1435,6 +1437,7 @@ const server = http.createServer(async (req, res) => {
     state.restoreAttempts = {};
     state.taskPlan = null;
     state.hooks = null;
+    state.guardrailResults = null;
     // Reset Conductor state
     stopConductorTimers();
     state.conductor = null;
@@ -1515,7 +1518,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/workflow/summary" && req.method === "GET") {
     const summary = state.conductor
       ? state.conductor.getSummary(sm.workflowStartedAt)
-      : { totalTasks: 0, completed: 0, failed: 0, timedOut: 0, retried: 0, totalDuration: 0, costEstimate: 0 };
+      : { totalTasks: 0, counts: { completed: 0, failed: 0, timed_out: 0, cancelled: 0, completed_with_errors: 0, retried: 0 }, elapsed: 0, summaryText: "" };
     return sendJson(res, 200, summary);
   }
 
@@ -1551,42 +1554,49 @@ const server = http.createServer(async (req, res) => {
       const runs = files.map(f => {
         try {
           const data = JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8"));
+          const cost = data.estimatedCost || null;
           return { id: data.id, goal: data.goal, model: data.model, outcome: data.outcome,
             duration: data.duration, taskCount: data.tasks ? data.tasks.length : 0,
-            estimatedCost: data.estimatedCost || null, startedAt: data.startedAt };
+            estimatedCost: cost, totalCost: cost, startedAt: data.startedAt };
         } catch (_) { return null; }
       }).filter(Boolean);
       return sendJson(res, 200, runs);
-    } catch (_) { return sendJson(res, 200, []); }
+    } catch (e) { console.error("History list error:", e.message); return sendJson(res, 200, []); }
   }
 
   const historyMatch = pathname.match(/^\/api\/history\/(.+)$/);
+
+  // Helper: derive filename from id (id uses : and . while filename uses -)
+  function findHistoryFile(id) {
+    const expectedFilename = id.replace(/[:.]/g, "-") + ".json";
+    const expectedPath = path.join(HISTORY_DIR, expectedFilename);
+    if (fs.existsSync(expectedPath)) return expectedFilename;
+    // Fallback: scan files if naming convention doesn't match
+    const files = fs.readdirSync(HISTORY_DIR).filter(f => f.endsWith(".json"));
+    return files.find(f => {
+      try { return JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8")).id === id; }
+      catch (_) { return false; }
+    }) || null;
+  }
+
   if (historyMatch && req.method === "GET") {
     const id = decodeURIComponent(historyMatch[1]);
     try {
-      const files = fs.readdirSync(HISTORY_DIR).filter(f => f.endsWith(".json"));
-      const file = files.find(f => {
-        try { return JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8")).id === id; }
-        catch (_) { return false; }
-      });
+      const file = findHistoryFile(id);
       if (!file) return sendJson(res, 404, { error: "Run not found" });
       const data = JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, file), "utf-8"));
       return sendJson(res, 200, data);
-    } catch (_) { return sendJson(res, 500, { error: "Failed to read history" }); }
+    } catch (e) { console.error("History GET error:", e.message); return sendJson(res, 500, { error: "Failed to read history" }); }
   }
 
   if (historyMatch && req.method === "DELETE") {
     const id = decodeURIComponent(historyMatch[1]);
     try {
-      const files = fs.readdirSync(HISTORY_DIR).filter(f => f.endsWith(".json"));
-      const file = files.find(f => {
-        try { return JSON.parse(fs.readFileSync(path.join(HISTORY_DIR, f), "utf-8")).id === id; }
-        catch (_) { return false; }
-      });
+      const file = findHistoryFile(id);
       if (!file) return sendJson(res, 404, { error: "Run not found" });
       fs.unlinkSync(path.join(HISTORY_DIR, file));
       return sendJson(res, 200, { ok: true });
-    } catch (_) { return sendJson(res, 500, { error: "Failed to delete" }); }
+    } catch (e) { console.error("History DELETE error:", e.message); return sendJson(res, 500, { error: "Failed to delete" }); }
   }
 
   if (pathname === "/api/memory" && req.method === "GET") {
@@ -1744,6 +1754,9 @@ const server = http.createServer(async (req, res) => {
     if (state.conductor) {
       const fileChanges = state.conductor.getFileChanges();
       if (fileChanges.length > 0) initData.fileChanges = fileChanges;
+    }
+    if (state.guardrailResults) {
+      initData.guardrailResults = state.guardrailResults;
     }
     if (state.workflowSummary) {
       initData.workflowSummary = state.workflowSummary;

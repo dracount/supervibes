@@ -3,42 +3,11 @@ import { useState, useEffect } from '../lib/preact-hooks.module.js';
 import { html } from '../lib/html.js';
 import { useStore, setState } from '../state/store.js';
 import { getHistoryList, getHistoryRun, deleteHistoryRun } from '../state/api.js';
-
-function formatDuration(ms) {
-  if (!ms) return '-';
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
-}
+import { formatDuration, outcomeBadge } from '../lib/format.js';
 
 function formatDate(ts) {
   if (!ts) return '-';
   return new Date(ts).toLocaleString();
-}
-
-function outcomeBadge(outcome) {
-  if (!outcome) return html`<span style=${{ color: '#888' }}>-</span>`;
-  const lower = (outcome || '').toLowerCase();
-  let bg, color;
-  if (lower === 'completed' || lower === 'success') {
-    bg = 'rgba(76, 175, 80, 0.2)'; color = '#81c784';
-  } else if (lower === 'failed') {
-    bg = 'rgba(244, 67, 54, 0.2)'; color = '#ef9a9a';
-  } else if (lower === 'stopped') {
-    bg = 'rgba(255, 193, 7, 0.2)'; color = '#ffd54f';
-  } else {
-    bg = 'rgba(255,255,255,0.08)'; color = '#aaa';
-  }
-  return html`<span style=${{
-    display: 'inline-block',
-    padding: '2px 8px',
-    borderRadius: '4px',
-    fontSize: '11px',
-    fontWeight: 600,
-    background: bg,
-    color: color,
-    textTransform: 'uppercase',
-  }}>${outcome}</span>`;
 }
 
 function formatCost(cost) {
@@ -89,6 +58,7 @@ export function HistoryView() {
 
   async function handleDelete(e, id) {
     e.stopPropagation();
+    if (!confirm('Delete this run from history?')) return;
     try {
       await deleteHistoryRun(id);
       const runs = await getHistoryList(50);

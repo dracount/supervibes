@@ -1,7 +1,5 @@
 "use strict";
 
-const { EventEmitter } = require("events");
-
 /**
  * StateManager — owns core workflow state and SSE broadcasting.
  *
@@ -12,9 +10,8 @@ const { EventEmitter } = require("events");
  *   running, phase, goal, model, terminalCount, iterations, currentIteration,
  *   sessions, stopped, reviewDone, sseClients, workflowStartedAt, postChecks
  */
-class StateManager extends EventEmitter {
+class StateManager {
   constructor() {
-    super();
     this.running = false;
     this.phase = "idle"; // "planning", "build", "review", "iteration", "postcheck", "idle"
     this.goal = "";
@@ -58,19 +55,6 @@ class StateManager extends EventEmitter {
   removeClient(res) {
     const idx = this.sseClients.indexOf(res);
     if (idx !== -1) this.sseClients.splice(idx, 1);
-  }
-
-  /**
-   * Reset workflow state to idle defaults.
-   */
-  reset() {
-    this.running = false;
-    this.phase = "idle";
-    this.sessions = [];
-    this.stopped = false;
-    this.reviewDone = false;
-    this.workflowStartedAt = null;
-    this.postChecks = null;
   }
 
   /**

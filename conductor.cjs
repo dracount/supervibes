@@ -3,7 +3,7 @@
 const { EventEmitter } = require("events");
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 const {
   createTaskStatus, calculateRetryDelay, isTaskTimedOut, canRetryTask,
   TASK_STATES, TASK_TYPES, WAIT_CONDITION_TYPES,
@@ -417,7 +417,9 @@ class ConductorExecutor extends EventEmitter {
           this._debounceTimers.set(taskName, debounce);
         }
 
-        debounce.pending.push(filename);
+        if (debounce.pending.length < 1000) {
+          debounce.pending.push(filename);
+        }
 
         if (debounce.timer) clearTimeout(debounce.timer);
         debounce.timer = setTimeout(() => {
@@ -612,7 +614,7 @@ class ConductorExecutor extends EventEmitter {
           conditionMet = fs.existsSync(filePath);
         } else if (ts.waitCondition.type === WAIT_CONDITION_TYPES.HTTP_READY) {
           try {
-            execSync(`curl -sf -o /dev/null --max-time 3 "${ts.waitCondition.target}"`, {
+            execFileSync("curl", ["-sf", "-o", "/dev/null", "--max-time", "3", ts.waitCondition.target], {
               timeout: 5000, stdio: "pipe"
             });
             conditionMet = true;

@@ -5,8 +5,8 @@ import { useStore } from '../state/store.js';
 
 // --- Sub-components for each event type ---
 
-function ThinkingBlock({ content, timestamp, defaultExpanded }) {
-  const [expanded, setExpanded] = useState(defaultExpanded || false);
+function ThinkingBlock({ content, timestamp }) {
+  const [expanded, setExpanded] = useState(false);
 
   return html`
     <div style=${{
@@ -264,23 +264,24 @@ export default function ConversationView({ agentName }) {
       }}
     >
       ${events.map((evt, i) => {
+        const key = `${evt.type}-${evt.timestamp || ''}-${i}`;
         if (evt.type === 'thinking') {
           return html`<${ThinkingBlock}
-            key=${i}
+            key=${key}
             content=${evt.content}
             timestamp=${evt.timestamp}
           />`;
         }
         if (evt.type === 'text') {
           return html`<${TextBlock}
-            key=${i}
+            key=${key}
             content=${evt.content}
             timestamp=${evt.timestamp}
           />`;
         }
         if (evt.type === 'tool_call') {
           return html`<${ToolCallBlock}
-            key=${i}
+            key=${key}
             toolName=${evt.toolName}
             input=${evt.input}
             toolId=${evt.toolId}
@@ -289,7 +290,7 @@ export default function ConversationView({ agentName }) {
         }
         if (evt.type === 'tool_result') {
           return html`<${ToolResultBlock}
-            key=${i}
+            key=${key}
             content=${evt.content}
             toolName=${evt.toolName}
             timestamp=${evt.timestamp}
@@ -297,7 +298,7 @@ export default function ConversationView({ agentName }) {
         }
         // Unknown event type — render minimal fallback
         return html`
-          <div key=${i} style=${{
+          <div key=${key} style=${{
             margin: '4px 0',
             padding: '4px 8px',
             color: '#888',

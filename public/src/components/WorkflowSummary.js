@@ -2,38 +2,7 @@ import { h } from '../lib/preact.module.js';
 import { useState, useEffect, useCallback } from '../lib/preact-hooks.module.js';
 import { html } from '../lib/html.js';
 import { useStore, setState } from '../state/store.js';
-
-function formatDuration(seconds) {
-  if (!seconds || seconds <= 0) return '-';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
-
-function outcomeBadge(outcome) {
-  const lower = (outcome || '').toLowerCase();
-  let bg, color;
-  if (lower === 'completed' || lower === 'success') {
-    bg = 'rgba(6, 214, 160, 0.2)'; color = 'var(--state-completed)';
-  } else if (lower === 'failed') {
-    bg = 'rgba(239, 71, 111, 0.2)'; color = 'var(--state-failed)';
-  } else if (lower === 'stopped') {
-    bg = 'rgba(255, 209, 102, 0.2)'; color = 'var(--state-retrying)';
-  } else {
-    bg = 'rgba(255,255,255,0.08)'; color = 'var(--text-secondary)';
-  }
-  return html`<span style=${{
-    display: 'inline-block',
-    padding: '6px 20px',
-    borderRadius: '6px',
-    fontSize: '16px',
-    fontWeight: 700,
-    background: bg,
-    color: color,
-    textTransform: 'uppercase',
-    letterSpacing: '1px',
-  }}>${outcome || 'unknown'}</span>`;
-}
+import { formatDuration, outcomeBadge } from '../lib/format.js';
 
 export function WorkflowSummary() {
   const summary = useStore(s => s.workflowSummary);
@@ -46,12 +15,14 @@ export function WorkflowSummary() {
     }
   }, [summary]);
 
-  // Expose show function for CommandPalette via store
+  // Listen for store-driven show requests
+  const showSummaryRequested = useStore(s => s.showWorkflowSummaryRequested);
   useEffect(() => {
-    // Store the opener function so CommandPalette can call it
-    window.__showWorkflowSummary = () => setShowModal(true);
-    return () => { delete window.__showWorkflowSummary; };
-  }, []);
+    if (showSummaryRequested && summary) {
+      setShowModal(true);
+      setState({ showWorkflowSummaryRequested: false });
+    }
+  }, [showSummaryRequested, summary]);
 
   // Esc to close
   useEffect(() => {
@@ -90,7 +61,7 @@ export function WorkflowSummary() {
 
         <!-- Outcome badge -->
         <div style=${{ textAlign: 'center', padding: '20px 0 16px' }}>
-          ${outcomeBadge(outcome)}
+          ${outcomeBadge(outcome, { large: true })}
         </div>
 
         <!-- Stats grid 2x2 -->
