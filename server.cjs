@@ -808,6 +808,27 @@ function spawnControllerWithPrompt(prompt, model) {
   }};
 }
 
+function ensureMonitor() {
+  if (state.monitor) return;
+  state.monitor = new JsonlMonitor();
+  state.monitor.on("sessionMapped", (tmuxName, sessionId) => {
+    broadcast("sessionMapped", { name: tmuxName, sessionId });
+    saveSessionState();
+  });
+  state.monitor.on("stateChange", (tmuxName, agentState, tokens) => {
+    broadcast("agentState", { name: tmuxName, state: agentState, tokens });
+  });
+  state.monitor.on("turnComplete", (tmuxName, durationMs) => {
+    broadcast("turnComplete", { name: tmuxName, durationMs });
+  });
+  state.monitor.on("conversation", (name, evt) => {
+    broadcast("agentConversation", { agent: name, ...evt });
+  });
+  state.monitor.on("contextWarning", (name, data) => {
+    broadcast("contextWarning", { agent: name, ...data });
+  });
+}
+
 function spawnController(goal, terminalCount, model, iteration) {
   const prompt = buildPrompt(goal, terminalCount, model, iteration || 0);
   const { child, flushBuffer } = spawnControllerWithPrompt(prompt, model);
@@ -821,26 +842,7 @@ function spawnController(goal, terminalCount, model, iteration) {
   state.phase = iteration === 0 ? "build" : "iteration";
 
   // Create JSONL monitor
-  if (!state.monitor) {
-    state.monitor = new JsonlMonitor();
-    state.monitor.on("sessionMapped", (tmuxName, sessionId) => {
-      broadcast("sessionMapped", { name: tmuxName, sessionId });
-      // Persist session state for crash recovery
-      saveSessionState();
-    });
-    state.monitor.on("stateChange", (tmuxName, agentState, tokens) => {
-      broadcast("agentState", { name: tmuxName, state: agentState, tokens });
-    });
-    state.monitor.on("turnComplete", (tmuxName, durationMs) => {
-      broadcast("turnComplete", { name: tmuxName, durationMs });
-    });
-    state.monitor.on("conversation", (name, evt) => {
-      broadcast("agentConversation", { agent: name, ...evt });
-    });
-    state.monitor.on("contextWarning", (name, data) => {
-      broadcast("contextWarning", { agent: name, ...data });
-    });
-  }
+  ensureMonitor();
 
   broadcast("status", {
     running: true,
@@ -1432,25 +1434,7 @@ function spawnExecutionPhase(plan, model) {
   }
 
   // Create JSONL monitor
-  if (!state.monitor) {
-    state.monitor = new JsonlMonitor();
-    state.monitor.on("sessionMapped", (tmuxName, sessionId) => {
-      broadcast("sessionMapped", { name: tmuxName, sessionId });
-      saveSessionState();
-    });
-    state.monitor.on("stateChange", (tmuxName, agentState, tokens) => {
-      broadcast("agentState", { name: tmuxName, state: agentState, tokens });
-    });
-    state.monitor.on("turnComplete", (tmuxName, durationMs) => {
-      broadcast("turnComplete", { name: tmuxName, durationMs });
-    });
-    state.monitor.on("conversation", (name, evt) => {
-      broadcast("agentConversation", { agent: name, ...evt });
-    });
-    state.monitor.on("contextWarning", (name, data) => {
-      broadcast("contextWarning", { agent: name, ...data });
-    });
-  }
+  ensureMonitor();
 
   child.on("exit", (code) => {
     flushBuffer();
@@ -1816,6 +1800,15 @@ const server = http.createServer(async (req, res) => {
         if (buf.length > 0) convos[name] = buf;
       }
       if (Object.keys(convos).length > 0) initData.agentConversations = convos;
+      // Include context warnings for late-joining clients
+      const warnings = {};
+      for (const [name, info] of state.monitor._sessions) {
+        if (info.contextWarned) {
+          const totalContext = info.tokens.input + info.tokens.cacheRead;
+          warnings[name] = { agent: name, totalContext, limit: 200000 };
+        }
+      }
+      if (Object.keys(warnings).length > 0) initData.contextWarnings = warnings;
     }
     res.write(`event: init\ndata: ${JSON.stringify(initData)}\n\n`);
 

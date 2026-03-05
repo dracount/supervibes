@@ -150,7 +150,9 @@ export function connectSSE() {
     if (d.agentConversations) {
       setState({ agentConversations: d.agentConversations });
     }
-    if (d.fileChanges) setState({ fileChanges: d.fileChanges });
+    if (d.contextWarnings) {
+      setState({ contextWarnings: d.contextWarnings });
+    }
   });
 
   eventSource.addEventListener('controller', (e) => {
@@ -206,13 +208,6 @@ export function connectSSE() {
     if (list.length > 200) list.splice(0, list.length - 200);
     convos[d.agent] = list;
     setState({ agentConversations: convos });
-  });
-
-  eventSource.addEventListener('fileChange', (e) => {
-    const d = JSON.parse(e.data);
-    const changes = [...getState().fileChanges, d];
-    if (changes.length > 500) changes.splice(0, changes.length - 500);
-    setState({ fileChanges: changes });
   });
 
   eventSource.addEventListener('contextWarning', (e) => {

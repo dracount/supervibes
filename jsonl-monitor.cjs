@@ -9,6 +9,26 @@ const os = require("os");
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 const POLL_INTERVAL_MS = 1000;
 const FILE_WATCH_INTERVAL_MS = 500;
+const MAX_CONTENT_LEN = 4000;
+const MAX_INPUT_VALUE_LEN = 2000;
+
+/** Truncate a string to maxLen characters. */
+function truncate(str, maxLen = MAX_CONTENT_LEN) {
+  if (typeof str !== 'string') return str;
+  return str.length > maxLen ? str.substring(0, maxLen) + '…' : str;
+}
+
+/** Truncate string values in a tool input object. */
+function truncateInput(input) {
+  if (!input || typeof input !== 'object') return input;
+  const out = {};
+  for (const [k, v] of Object.entries(input)) {
+    out[k] = typeof v === 'string' && v.length > MAX_INPUT_VALUE_LEN
+      ? v.substring(0, MAX_INPUT_VALUE_LEN) + '…'
+      : v;
+  }
+  return out;
+}
 
 /**
  * Encodes a project directory path into Claude's JSONL directory name.
@@ -106,7 +126,7 @@ class JsonlMonitor extends EventEmitter {
    */
   getConversation(tmuxName) {
     const info = this._sessions.get(tmuxName);
-    return info ? [...(info.conversationBuffer || [])] : [];
+    return info ? [...info.conversationBuffer] : [];
   }
 
   /**
@@ -239,15 +259,21 @@ class JsonlMonitor extends EventEmitter {
       }
 
       // Emit conversation events for dashboard
-      if (msg.message && msg.message.content && Array.isArray(msg.message.content)) {
-        for (const block of msg.message.content) {
+      // Assistant messages: thinking, text, tool_use blocks
+      // User messages: tool_result blocks (may be at msg.content or msg.message.content)
+      const contentBlocks =
+        (msg.message && Array.isArray(msg.message.content) && msg.message.content) ||
+        (Array.isArray(msg.content) && msg.content) ||
+        null;
+      if (contentBlocks) {
+        for (const block of contentBlocks) {
           let evt = null;
           if (block.type === 'thinking') {
-            evt = { type: 'thinking', content: block.thinking, timestamp: Date.now() };
+            evt = { type: 'thinking', content: truncate(block.thinking, 4000), timestamp: Date.now() };
           } else if (block.type === 'text') {
-            evt = { type: 'text', content: block.text, timestamp: Date.now() };
+            evt = { type: 'text', content: truncate(block.text, 4000), timestamp: Date.now() };
           } else if (block.type === 'tool_use') {
-            evt = { type: 'tool_call', toolName: block.name, toolId: block.id, input: block.input, timestamp: Date.now() };
+            evt = { type: 'tool_call', toolName: block.name, toolId: block.id, input: truncateInput(block.input), timestamp: Date.now() };
           } else if (block.type === 'tool_result') {
             evt = {
               type: 'tool_result',

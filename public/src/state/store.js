@@ -36,16 +36,8 @@ const state = {
   // Agent conversations — name → [{type, content, timestamp, ...}]
   agentConversations: {},
 
-  // File changes
-  fileChanges: [],  // [{path, type, agent, timestamp}]
-
   // Context warnings
   contextWarnings: {},  // name → { totalContext, limit }
-
-  // History
-  showHistory: false,
-  historyRuns: [],       // [{id, goal, model, outcome, duration, taskCount, ...}]
-  historySelectedRun: null, // full run data when viewing detail
 
   // UI
   selectedAgent: null,
