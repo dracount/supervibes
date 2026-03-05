@@ -127,6 +127,26 @@
 }
 .feed-entry .feed-action-btn:hover { background: var(--bg-elevated); color: var(--text-primary); }
 
+/* Intervention highlight */
+.feed-entry.intervention-highlight {
+  border-left: 3px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.06);
+  padding-left: 11px;
+}
+
+/* Agent badge next to timestamp */
+.feed-agent-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
 .feed-empty {
   display: flex;
   align-items: center;

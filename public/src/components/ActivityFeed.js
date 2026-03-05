@@ -77,9 +77,10 @@ export function ActivityFeed({ style }) {
           <div class="feed-empty">No activity yet</div>
         `}
         ${filtered.map((entry, i) => html`
-          <div class="feed-entry type-${entry.type} ${entry.agent ? 'clickable' : ''}"
+          <div class="feed-entry type-${entry.type} ${entry.agent ? 'clickable' : ''} ${entry.type === 'intervention' ? 'intervention-highlight' : ''}"
                onClick=${() => handleEntryClick(entry)} key=${`${entry.type}-${entry.time?.getTime?.() || i}-${i}`}>
             <span class="feed-time">${fmtTime(entry.time)}</span>
+            ${entry.agent && html`<span class="feed-agent-badge">[${entry.agent}]</span>`}
             <span class="feed-icon">${entry.icon}</span>
             <span class="feed-msg">${entry.msg}</span>
           </div>

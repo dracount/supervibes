@@ -66,6 +66,7 @@ const state = {
   guardrailResults: null,  // last guardrail results map (for late-joining SSE clients)
   // --- Conductor-inspired features (managed by ConductorExecutor) ---
   conductor: null,         // ConductorExecutor instance — owns taskStatus, retryQueue, timers
+  workflowSummary: null,   // last workflow summary object (for late-joining SSE clients)
 };
 
 // --- Helpers ---
@@ -932,6 +933,24 @@ function finishRun(reason) {
     const summary = generateWorkflowSummary();
     pushControllerLine(summary);
     broadcast("controller", { line: summary });
+
+    // Broadcast structured summary for WorkflowSummary modal
+    const structuredSummary = state.conductor.getSummary(sm.workflowStartedAt);
+    if (structuredSummary) {
+      // Enrich with per-task details for the modal
+      structuredSummary.outcome = !reason ? "completed"
+        : (reason.toLowerCase().includes("stopped") ? "stopped" : "failed");
+      structuredSummary.taskDetails = Object.entries(state.conductor.getTaskStatus()).map(([name, ts]) => ({
+        name,
+        status: ts.status,
+        attempts: ts.attempts,
+        maxAttempts: ts.maxAttempts,
+        error: ts.error,
+        duration: ts.startedAt && ts.completedAt ? ts.completedAt - ts.startedAt : null,
+      }));
+      state.workflowSummary = structuredSummary;
+      broadcast("workflowSummary", structuredSummary);
+    }
   }
 
   notify("Multi-Claude", reason ? `Build finished: ${reason}` : "Build complete");
@@ -1158,6 +1177,7 @@ function spawnPlanningPhase(goal, terminalCount, model) {
   sm.sessions = [];
   state.taskPlan = null;
   state.conductor = null;
+  state.workflowSummary = null;
 
   broadcast("status", { running: true, phase: "planning", goal, terminalCount });
 
@@ -1724,6 +1744,9 @@ const server = http.createServer(async (req, res) => {
     if (state.conductor) {
       const fileChanges = state.conductor.getFileChanges();
       if (fileChanges.length > 0) initData.fileChanges = fileChanges;
+    }
+    if (state.workflowSummary) {
+      initData.workflowSummary = state.workflowSummary;
     }
     res.write(`event: init\ndata: ${JSON.stringify(initData)}\n\n`);
 

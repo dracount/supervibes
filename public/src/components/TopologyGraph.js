@@ -49,6 +49,7 @@ export function TopologyGraph() {
   const taskStatus = useStore(s => s.taskStatus);
   const agentStates = useStore(s => s.agentStates);
   const contextWarnings = useStore(s => s.contextWarnings);
+  const logEntries = useStore(s => s.logEntries);
   const selectedAgent = useStore(s => s.selectedAgent);
   const containerRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 500 });
@@ -67,6 +68,16 @@ export function TopologyGraph() {
     return html`<div class="topology-graph" ref=${containerRef}>
       <div class="graph-empty">Waiting for execution plan...</div>
     </div>`;
+  }
+
+  // Build set of agent names that received interventions
+  const interventionAgents = new Set();
+  if (logEntries) {
+    for (const entry of logEntries) {
+      if (entry.type === 'intervention' && entry.agent) {
+        interventionAgents.add(entry.agent);
+      }
+    }
   }
 
   const { nodes, edges, phases } = computeLayout(taskPlan, size.w, size.h);
@@ -106,6 +117,7 @@ export function TopologyGraph() {
           const totalTok = (tokens.input || 0) + (tokens.output || 0);
           const isSelected = selectedAgent === n.name;
           const task = n.task || {};
+          const hasIntervention = interventionAgents.has(n.name);
 
           return html`
             <g class="graph-node state-${state} ${isSelected ? 'selected' : ''}"
@@ -114,6 +126,13 @@ export function TopologyGraph() {
               <!-- State dot -->
               <circle class="node-state-dot" cx=${n.x + 14} cy=${n.y + 16} r="4"
                 fill=${stateColor(state)} />
+              <!-- Intervention badge -->
+              ${hasIntervention && html`
+                <circle cx=${n.x + 7} cy=${n.y + 7} r="7"
+                  fill="#f59e0b" stroke="var(--bg-surface)" stroke-width="1" />
+                <text x=${n.x + 7} y=${n.y + 10} text-anchor="middle"
+                  style="font-size:9px;fill:#000;font-weight:700;pointer-events:none;">!</text>
+              `}
               ${state === 'timed_out' && html`
                 <text x=${n.x + n.w - 12} y=${n.y + 16} text-anchor="end"
                   style="font-size:9px;font-weight:700;fill:#ff9800;font-family:var(--font-mono);">T/O</text>

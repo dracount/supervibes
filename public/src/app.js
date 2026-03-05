@@ -9,6 +9,8 @@ import { TopologyGraph } from './components/TopologyGraph.js';
 import { AgentDetail } from './components/AgentDetail.js';
 import { ActivityFeed } from './components/ActivityFeed.js';
 import { CommandPalette } from './components/CommandPalette.js';
+import { HistoryView } from './components/HistoryView.js';
+import { WorkflowSummary } from './components/WorkflowSummary.js';
 
 function useResizeH(initialHeight) {
   const [height, setHeight] = useState(initialHeight);
@@ -68,10 +70,18 @@ function App() {
         return;
       }
 
+      if ((e.metaKey || e.ctrlKey) && e.key === 'h') {
+        e.preventDefault();
+        setState({ showHistory: !getState().showHistory });
+        return;
+      }
+
       if (e.key === 'Escape') {
         const s = getState();
         if (s.showCommandPalette) {
           setState({ showCommandPalette: false });
+        } else if (s.showHistory) {
+          setState({ showHistory: false, historySelectedRun: null });
         } else if (s.selectedAgent) {
           setState({ selectedAgent: null });
         }
@@ -115,8 +125,10 @@ function App() {
     </div>
     <div class="resize-handle-h ${feedDragging ? 'active' : ''}" onMouseDown=${onFeedResize}></div>
     <${ActivityFeed} style=${{ height: feedHeight + 'px' }} />
-    <div class="shortcut-hint">\u2318K palette \u00b7 1-9 agents \u00b7 Space pause \u00b7 Esc deselect</div>
+    <div class="shortcut-hint">\u2318K palette \u00b7 \u2318H history \u00b7 1-9 agents \u00b7 Space pause \u00b7 Esc deselect</div>
     <${CommandPalette} />
+    <${HistoryView} />
+    <${WorkflowSummary} />
   `;
 }
 

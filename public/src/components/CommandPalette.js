@@ -61,7 +61,24 @@ function buildActions() {
     }
   }
 
+  // Workflow summary
+  if (s.workflowSummary) {
+    actions.push({
+      id: 'view:summary', icon: '\u2611', label: 'View last workflow summary', shortcut: '',
+      category: 'view',
+      action: () => {
+        setState({ showCommandPalette: false });
+        if (window.__showWorkflowSummary) window.__showWorkflowSummary();
+      },
+    });
+  }
+
   // View toggles
+  actions.push({
+    id: 'view:history', icon: '\ud83d\udcdc', label: 'View Run History', shortcut: '\u2318H',
+    category: 'view',
+    action: () => setState({ showHistory: true, showCommandPalette: false }),
+  });
   actions.push({
     id: 'view:deselect', icon: '\u2715', label: 'Deselect agent', shortcut: 'Esc',
     category: 'view',
